@@ -469,7 +469,7 @@ export class PlaneScene extends Phaser.Scene {
     this.decor?.forEach((d) => d.node.destroy());
     this.decor = [];
     const clear = Math.max(90, (this.plane?.displayWidth || 90) * 1.5);
-    const values = [1, 1, 2, 2, 2, 3, 5];
+    const values = [1, 1, 2, 2, 2, 3, 5, 10];
 
     for (let i = 0; i < DECOR_NUMBERS; i += 1) {
       const spot = this.corridorSpot(i * 3 + 5, clear, 0.6);
