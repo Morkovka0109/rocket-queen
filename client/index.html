@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#08122e" />
+    <meta name="color-scheme" content="dark" />
+    <title>Авиатор</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div id="boot-screen" class="boot-screen">Авиатор</div>
+    <div id="app" class="app" data-phase="waiting" data-mode="launch">
+      <header class="topbar">
+        <button id="menu-btn" class="icon-btn" type="button" aria-label="Меню">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M5 7h14M5 12h14M5 17h14" />
+          </svg>
+        </button>
+      </header>
+
+      <section class="stage" aria-label="Полёт">
+        <div id="game-root" class="game-root"></div>
+        <div id="fx-flash" class="fx fx-flash" aria-hidden="true"></div>
+        <div id="fx-lose" class="fx fx-lose" aria-hidden="true"></div>
+        <div id="fx-dim" class="fx fx-dim" aria-hidden="true"></div>
+        <p id="event-banner" class="event-banner" hidden></p>
+        <p id="streak-chip" class="streak-chip" hidden></p>
+        <p id="plane-label" class="plane-label">1,00 ФАН</p>
+      </section>
+
+      <footer class="dash">
+        <div class="stats-row">
+          <div class="stat">
+            <span>Высота</span>
+            <strong id="stat-height">0.0m</strong>
+          </div>
+          <div class="stat">
+            <span>Расстояние</span>
+            <strong id="stat-distance">0.0m</strong>
+          </div>
+          <div class="stat">
+            <span>Множитель</span>
+            <strong id="stat-mult">x1,00</strong>
+          </div>
+        </div>
+        <div class="speeds" id="speeds">
+          <button type="button" class="speed" data-speed="1.2" aria-label="Медленно">
+            <svg viewBox="0 0 24 24"><ellipse cx="12" cy="14" rx="8" ry="5"/><path d="M6 14c0-4 3-8 6-8s6 4 6 8"/><circle cx="9" cy="13" r="1"/><circle cx="15" cy="13" r="1"/></svg>
+          </button>
+          <button type="button" class="speed is-on" data-speed="2" aria-label="Шаг">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="6" r="2.2"/><path d="M12 9v5m0 0-3 6m3-6 3 6M9 12h6"/></svg>
+          </button>
+          <button type="button" class="speed" data-speed="3" aria-label="Быстро">
+            <svg viewBox="0 0 24 24"><ellipse cx="13" cy="14" rx="6" ry="4"/><path d="M8 14c1-5 4-8 8-7"/><path d="M4 11h4M3 14h4"/></svg>
+          </button>
+          <button type="button" class="speed" data-speed="5" aria-label="Максимум">
+            <svg viewBox="0 0 24 24"><path d="M13 2 6 13h6l-1 9 8-12h-6l0-8z"/></svg>
+          </button>
+        </div>
+        <div class="money-row">
+          <div class="balance-block">
+            <span>Баланс</span>
+            <strong id="balance">0,00 ФАН</strong>
+          </div>
+          <button id="bonus-btn" class="bonus-btn" type="button">
+            <svg class="cam" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <rect x="3" y="7" width="13" height="10" rx="2" />
+              <path d="M16 10l5-3v10l-5-3" />
+            </svg>
+            + 100 ФАН
+          </button>
+          <label class="bet-block">
+            <span>Ставка</span>
+            <strong id="bet-view">1,00 ФАН</strong>
+            <span class="bet-arrows">
+              <button id="bet-up" type="button" aria-label="Больше">▲</button>
+              <button id="bet-down" type="button" aria-label="Меньше">▼</button>
+            </span>
+          </label>
+          <button id="play-btn" class="play-btn" type="button" aria-label="Запустить самолёт">
+            <span class="play-icon"></span>
+          </button>
+        </div>
+        <p id="status" class="status"></p>
+      </footer>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
