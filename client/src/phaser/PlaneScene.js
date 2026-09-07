@@ -46,9 +46,21 @@ function skyEvents(mod) {
   return out;
 }
 
-const FLEET_MAX = 5;
-const FLEET_MIN = 4;
-const CLOUD_COUNT = 28;
+// The world is far wider and taller than the viewport: the camera rides along
+// with the plane and the sea scrolls out of frame once it climbs, exactly as in
+// the reference game.
+const WORLD_SPANS = 5.5; // screens of horizontal course
+const SKY_SPANS = 3.2; // screens of climbing room above the waterline
+const SEA_SPANS = 1.1; // screens of water below the waterline
+const CLOUD_COUNT = 30;
+const DECOR_NUMBERS = 96;
+const DECOR_ROCKETS = 16;
+
+// Camera keeps the plane right of centre and half way up the frame.
+const PLANE_SCREEN_X = 0.64;
+const PLANE_SCREEN_Y = 0.5;
+// Lowest the camera descends, chosen so the waterline settles at 63.2% height.
+const HORIZON_SCREEN = 0.632;
 
 function waveFor(events) {
   if (!events.length) return { ratio: 0.6, freq: Math.PI * 3.2 };
@@ -58,6 +70,12 @@ function waveFor(events) {
     ratio: 0.5 + (seed % 51) / 100,
     freq: Math.PI * (2.2 + (Math.floor(seed / 4) % 25) / 10),
   };
+}
+
+// Deterministic scatter so decor keeps its place across redraws.
+function hashUnit(n) {
+  const x = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+  return x - Math.floor(x);
 }
 
 export class PlaneScene extends Phaser.Scene {
@@ -147,24 +165,26 @@ export class PlaneScene extends Phaser.Scene {
     this.sky = this.add.graphics().setDepth(0);
     this.sea = this.add.graphics().setDepth(0);
     this.sparkles = this.add.graphics().setDepth(1);
-    this.carriers = this.add.graphics().setDepth(2);
     this.pickups = this.add.container(0, 0).setDepth(7);
     this.trail = this.add.graphics().setDepth(5);
     this.fxLayer = this.add.graphics().setDepth(5);
     this.cloudLayer = this.add.graphics().setDepth(1);
-    this.dots = Array.from({ length: 18 }, () => ({
-      x: Math.random(),
-      y: Math.random(),
-      r: Math.random() * 1.6 + 0.4,
-      s: Math.random() * 2 + 0.4,
+    this.dots = Array.from({ length: 260 }, (_, i) => ({
+      x: hashUnit(i + 1),
+      y: hashUnit(i + 91),
+      r: hashUnit(i + 181) * 1.4 + 0.5,
+      s: hashUnit(i + 271) * 2 + 0.4,
     }));
     this.items = [];
+    this.decor = [];
     this.chromaCrop('plane-raw', 'plane');
     this.chromaCrop('carrier-left-raw', 'carrier-left');
     this.chromaCrop('carrier-right-raw', 'carrier-right');
     this.chromaCrop('rocket-raw', 'rocket');
     this.chromaCrop('cloud-raw', 'cloud');
 
+    // Squadron emblem is pinned to the viewport in the reference game, not to
+    // the world, so it stays put while everything else scrolls past.
     this.mark = this.add
       .text(0, 0, 'A', {
         fontFamily: 'Manrope, Arial, sans-serif',
@@ -174,27 +194,18 @@ export class PlaneScene extends Phaser.Scene {
       })
       .setOrigin(0.5)
       .setAlpha(0.08)
+      .setScrollFactor(0)
       .setDepth(1);
 
-    this.ships = Array.from({ length: FLEET_MAX }, (_, i) =>
-      this.add
-        .image(0, 0, i % 2 === 0 ? 'carrier-left' : 'carrier-right')
-        .setDepth(2)
-        .setOrigin(0.5, 0.72),
-    );
+    // Only two carriers exist: the one launched from and the one landed on.
+    this.ships = [
+      this.add.image(0, 0, 'carrier-left').setDepth(2).setOrigin(0.5, 0.72),
+      this.add.image(0, 0, 'carrier-right').setDepth(2).setOrigin(0.5, 0.72),
+    ];
     this.catapultRig = this.add.graphics().setDepth(3);
-    this.courseGuide = this.add.graphics().setDepth(4);
-    // The reference sky is filled with many small, muted clouds rather than a
-    // few large white ones.
     this.cloudSprites = Array.from({ length: CLOUD_COUNT }, () =>
       this.add.image(0, 0, 'cloud').setDepth(1).setAlpha(0.5).setTint(0x9fb0d4),
     );
-    this.cloudSeeds = Array.from({ length: CLOUD_COUNT }, (_, i) => ({
-      x: (i * 0.618) % 1,
-      y: ((i * 0.383) % 1) * 0.86,
-      size: 0.55 + ((i * 7) % 10) / 14,
-      drift: 6 + ((i * 3) % 7) * 2.2,
-    }));
 
     this.plane = this.add.image(0, 0, 'plane').setDepth(8);
     this.plane.setOrigin(0.52, 0.58);
@@ -216,42 +227,29 @@ export class PlaneScene extends Phaser.Scene {
     };
   }
 
-  // Narrow phones cannot fit five readable decks, so the fleet shrinks to the
-  // minimum instead of turning every carrier into an unrecognisable sliver.
-  fleetSize() {
-    return this.size().w < 620 ? FLEET_MIN : FLEET_MAX;
-  }
-
-  layout() {
+  // Waterline sits at world y = 0; the sky runs into negative y.
+  world() {
     const { w, h } = this.size();
-    const horizon = h * 0.632;
-    const n = this.fleetSize();
-    const margin = w * 0.02;
-    // Widest deck that still leaves clear water between neighbours while keeping
-    // the outer carriers fully on screen: ww <= 0.86 * gap.
-    const ww = (0.86 * (w - margin * 2)) / (n - 0.14);
-    const first = ww * 0.5 + margin;
-    const gap = (w - ww - margin * 2) / (n - 1);
-    const fleet = Array.from({ length: n }, (_, i) => ({
-      x: first + gap * i,
-      y: horizon + 2,
-      ww,
-      hh: Math.max(52, ww * 0.36),
-    }));
     return {
       w,
       h,
-      horizon,
-      fleet,
-      left: fleet[0],
-      ship: fleet[n - 1],
+      worldW: w * WORLD_SPANS,
+      skyTop: -h * SKY_SPANS,
+      seaBottom: h * SEA_SPANS,
     };
   }
 
-  // Keeps the plane sized against the deck it launches from, so the fleet and
-  // the plane stay in proportion on every screen width.
+  layout() {
+    const { w, h, worldW } = this.world();
+    const ww = w * 0.52;
+    const launch = { x: w * 0.16, y: 0, ww };
+    const target = { x: worldW - w * 0.34, y: 0, ww };
+    return { w, h, worldW, horizon: 0, fleet: [launch, target], left: launch, ship: target };
+  }
+
+  // Keeps the plane sized against the deck it launches from.
   planeHeightFor(deckWidth) {
-    return Math.max(24, Math.min(84, deckWidth * 0.22));
+    return Math.max(26, Math.min(96, deckWidth * 0.2));
   }
 
   deckClearance() {
@@ -259,35 +257,87 @@ export class PlaneScene extends Phaser.Scene {
   }
 
   startPoint() {
-    const { left, horizon } = this.layout();
-    const halfW = (this.plane?.displayWidth || 60) * 0.55;
-    return { x: Math.max(halfW, left.x - left.ww * 0.16), y: horizon - this.deckClearance() };
+    const { left } = this.layout();
+    return { x: left.x - left.ww * 0.16, y: -this.deckClearance() };
   }
 
-  // Opening frame: the launch deck with its catapult, the plane, the first
-  // stretch of the course and the next carrier ahead.
-  startFraming() {
-    const { w, h, fleet } = this.layout();
-    const ahead = fleet[1] ?? fleet[0];
-    const rightEdge = ahead.x + ahead.ww * 0.5 + w * 0.03;
+  landPoint() {
+    const { ship } = this.layout();
+    return { x: ship.x - ship.ww * 0.1, y: -this.deckClearance() };
+  }
+
+  pathPoints() {
+    const { h } = this.world();
+    const start = this.startPoint();
+    const land = this.landPoint();
+    const span = land.x - start.x;
+    // Climbs about a screen and a half above the waterline, so the sea leaves
+    // the frame for most of the flight and only returns for the landing.
+    return [
+      start,
+      { x: start.x + span * 0.22, y: -h * 1.05 },
+      { x: start.x + span * 0.7, y: -h * 1.5 },
+      { x: land.x - 8, y: -h * 0.32 },
+    ];
+  }
+
+  pathAt(t) {
+    const [p0, p1, p2, p3] = this.pathPoints();
+    const clamped = Phaser.Math.Clamp(t, 0, 1);
+    const pos = bezier(p0, p1, p2, p3, clamped);
+    const wv = this.roundWave;
+    const amp = (this.waveCap ?? 40) * wv.ratio;
+    const wave = Math.sin(clamped * wv.freq) * amp * Math.sin(Math.PI * clamped);
+    const tan = bezierTangent(p0, p1, p2, p3, clamped);
+    const len = Math.hypot(tan.x, tan.y) || 1;
+    const nx = -tan.y / len;
+    const ny = tan.x / len;
     return {
-      zoom: Phaser.Math.Clamp(w / rightEdge, 1, 2.6),
-      x: rightEdge * 0.5,
-      y: h * 0.46,
+      x: pos.x + nx * wave,
+      y: pos.y + ny * wave,
+      angle: Phaser.Math.RadToDeg(Math.atan2(tan.y, tan.x)) * 0.62,
+      nx,
+      ny,
+      tan,
     };
   }
 
-  // Pulls back to the full seascape while tracking the plane, so each carrier
-  // ahead slides into frame as the flight goes on.
+  // Height of the course at a given world x. The course is monotonic in x, so a
+  // coarse sample with a linear fill is accurate enough to hang scenery on.
+  courseYAtX(x) {
+    const [p0, p1, p2, p3] = this.pathPoints();
+    let prev = bezier(p0, p1, p2, p3, 0);
+    for (let i = 1; i <= 48; i += 1) {
+      const cur = bezier(p0, p1, p2, p3, i / 48);
+      if (x <= cur.x) {
+        const span = cur.x - prev.x || 1;
+        return lerp(prev.y, cur.y, Phaser.Math.Clamp((x - prev.x) / span, 0, 1));
+      }
+      prev = cur;
+    }
+    return prev.y;
+  }
+
+  courseT(progress) {
+    return Phaser.Math.Clamp(progress * 0.97, 0, 0.97);
+  }
+
+  flightT() {
+    return this.courseT(this.progress);
+  }
+
+  // Camera rides with the plane: no zoom, the world scrolls instead. It stops
+  // descending once the waterline reaches its reference height, so a crash into
+  // the sea stays in frame instead of dragging the horizon off screen.
   cameraTarget() {
-    const { w, h } = this.layout();
-    const open = this.startFraming();
-    if (!this.launched || this.phase === 'waiting') return open;
-    const k = Phaser.Math.Easing.Sine.InOut(Phaser.Math.Clamp(this.progress / 0.55, 0, 1));
+    const { w, h, worldW } = this.world();
+    const anchorX = this.smooth.x - w * (PLANE_SCREEN_X - 0.5);
+    const anchorY = this.smooth.y - h * (PLANE_SCREEN_Y - 0.5);
+    const lowest = h * (0.5 - HORIZON_SCREEN);
     return {
-      zoom: lerp(open.zoom, 1, k),
-      x: lerp(this.smooth.x, w / 2, k),
-      y: lerp(this.smooth.y, h / 2, k),
+      zoom: 1,
+      x: Phaser.Math.Clamp(anchorX, w / 2, worldW - w / 2),
+      y: Math.min(anchorY, lowest),
     };
   }
 
@@ -297,52 +347,54 @@ export class PlaneScene extends Phaser.Scene {
     if (snap || !this.cam) {
       this.cam = { ...target };
     } else {
-      const k = 1 - Math.pow(0.004, delta / 1000);
+      // Tight follow: the reference keeps the plane pinned in the frame, so the
+      // camera may only lag enough to absorb the clamp transitions.
+      const k = 1 - Math.exp(-delta / 45);
       this.cam.x = lerp(this.cam.x, target.x, k);
       this.cam.y = lerp(this.cam.y, target.y, k);
-      this.cam.zoom = lerp(this.cam.zoom, target.zoom, k);
+      this.cam.zoom = target.zoom;
     }
     cam.setZoom(this.cam.zoom);
     cam.centerOn(this.cam.x, this.cam.y);
   }
 
   catapultEnd() {
-    const { w, horizon } = this.layout();
+    const { w } = this.size();
     const start = this.startPoint();
-    return { x: start.x + Math.min(96, w * 0.07), y: horizon - 30 };
+    return { x: start.x + Math.min(96, w * 0.07), y: -30 };
   }
 
   drawCatapult() {
     const g = this.catapultRig;
     if (!g) return;
     g.clear();
-    const { horizon, fleet } = this.layout();
+    const { fleet } = this.layout();
     const deck = fleet[0];
     const s = Math.max(0.4, deck.ww / 340);
     const start = this.startPoint();
-    const railFrom = Math.max(2, deck.x - deck.ww * 0.4);
+    const railFrom = deck.x - deck.ww * 0.4;
     const railTo = deck.x + deck.ww * 0.34;
 
     g.fillStyle(0x1d2536, 1);
-    g.fillRect(railFrom, horizon - 4 * s, railTo - railFrom, 5 * s);
+    g.fillRect(railFrom, -4 * s, railTo - railFrom, 5 * s);
     g.fillStyle(0xffc933, 0.8);
-    g.fillRect(railFrom + 4 * s, horizon - 2 * s, railTo - railFrom - 8 * s, 1.6 * s);
+    g.fillRect(railFrom + 4 * s, -2 * s, railTo - railFrom - 8 * s, 1.6 * s);
 
     // Shuttle the plane is hooked to, sitting under its wheels.
     g.fillStyle(0xdfe6f2, 1);
-    g.fillRect(start.x - 10 * s, horizon - 9 * s, 20 * s, 6 * s);
+    g.fillRect(start.x - 10 * s, -9 * s, 20 * s, 6 * s);
     g.fillStyle(0x8fa2bd, 1);
-    g.fillRect(start.x - 10 * s, horizon - 4 * s, 20 * s, 2 * s);
+    g.fillRect(start.x - 10 * s, -4 * s, 20 * s, 2 * s);
 
     // Jet blast deflector raised behind the shuttle.
     const plateX = start.x - 22 * s;
     if (plateX > railFrom) {
       g.fillStyle(0x39445c, 1);
       g.beginPath();
-      g.moveTo(plateX - 12 * s, horizon);
-      g.lineTo(plateX - 2 * s, horizon - 18 * s);
-      g.lineTo(plateX + 6 * s, horizon - 17 * s);
-      g.lineTo(plateX + 2 * s, horizon);
+      g.moveTo(plateX - 12 * s, 0);
+      g.lineTo(plateX - 2 * s, -18 * s);
+      g.lineTo(plateX + 6 * s, -17 * s);
+      g.lineTo(plateX + 2 * s, 0);
       g.closePath();
       g.fillPath();
     }
@@ -366,81 +418,19 @@ export class PlaneScene extends Phaser.Scene {
     }
   }
 
-  landPoint() {
-    const { ship, horizon } = this.layout();
-    return { x: ship.x - ship.ww * 0.1, y: horizon - this.deckClearance() };
-  }
-
-  pathPoints() {
-    const { h } = this.layout();
-    const start = this.startPoint();
-    const land = this.landPoint();
-    const span = land.x - start.x;
-    return [
-      start,
-      { x: start.x + span * 0.28, y: h * 0.26 },
-      { x: start.x + span * 0.64, y: h * 0.1 },
-      { x: land.x - 6, y: h * 0.17 },
-    ];
-  }
-
-  planeCeiling() {
-    const { h } = this.size();
-    return h * 0.035 + (this.plane?.displayHeight || 56) * 0.6;
-  }
-
-  waveHeadroom() {
-    const [p0, p1, p2, p3] = this.pathPoints();
-    let apex = Infinity;
-    for (let i = 0; i <= 24; i += 1) {
-      const y = bezier(p0, p1, p2, p3, i / 24).y;
-      if (y < apex) apex = y;
-    }
-    return Math.max(0, apex - this.planeCeiling());
-  }
-
-  pathAt(t) {
-    const [p0, p1, p2, p3] = this.pathPoints();
-    const clamped = Phaser.Math.Clamp(t, 0, 1);
-    const pos = bezier(p0, p1, p2, p3, clamped);
-    const wv = this.roundWave;
-    const amp = (this.waveCap ?? 30) * wv.ratio;
-    const wave = Math.sin(clamped * wv.freq) * amp * Math.sin(Math.PI * clamped);
-    const tan = bezierTangent(p0, p1, p2, p3, clamped);
-    const len = Math.hypot(tan.x, tan.y) || 1;
-    const nx = -tan.y / len;
-    const ny = tan.x / len;
-    return {
-      x: pos.x + nx * wave,
-      y: Math.max(this.planeCeiling(), pos.y + ny * wave),
-      angle: Phaser.Math.RadToDeg(Math.atan2(tan.y, tan.x)) * 0.62,
-      nx,
-      ny,
-      tan,
-    };
-  }
-
-  courseT(progress) {
-    return Phaser.Math.Clamp(progress * 0.97, 0, 0.97);
-  }
-
-  flightT() {
-    return this.courseT(this.progress);
-  }
-
   redrawBackdrop() {
-    const { w, h, horizon, fleet } = this.layout();
+    const { w, h, worldW, skyTop, seaBottom } = this.world();
+    const { fleet } = this.layout();
     // Palette sampled from the reference game: the sky brightens towards the
-    // horizon and the sea is a flat, darker blue.
+    // waterline and the sea is a flat, darker blue.
     this.sky.clear();
-    this.sky.fillGradientStyle(0x213576, 0x213576, 0x34488f, 0x34488f, 1);
-    this.sky.fillRect(0, 0, w, horizon);
+    this.sky.fillGradientStyle(0x1b2a63, 0x1b2a63, 0x34488f, 0x34488f, 1);
+    this.sky.fillRect(0, skyTop, worldW, -skyTop);
     this.sea.clear();
     this.sea.fillStyle(0x0d1c71, 1);
-    this.sea.fillRect(0, horizon, w, h - horizon);
+    this.sea.fillRect(0, 0, worldW, seaBottom);
     this.sea.lineStyle(1, 0xffffff, 0.28);
-    this.sea.lineBetween(0, horizon, w, horizon);
-    this.carriers.clear();
+    this.sea.lineBetween(0, 0, worldW, 0);
     this.ships?.forEach((img, i) => {
       const slot = fleet[i];
       img.setVisible(Boolean(slot));
@@ -454,10 +444,11 @@ export class PlaneScene extends Phaser.Scene {
       if (this.phase !== 'appearing') this.plane.setScale(this.baseScale);
     }
     this.drawCatapult();
-    this.cameras.main.setBounds(0, 0, w, h);
-    this.waveCap = this.waveHeadroom();
-    this.mark?.setPosition(w / 2, h * 0.18);
-    this.mark?.setFontSize(Math.round(Math.min(110, w * 0.22)));
+    this.waveCap = Math.max(20, h * 0.05);
+    this.scatterDecor();
+    this.layoutClouds();
+    this.mark?.setPosition(w / 2, h * 0.07);
+    this.mark?.setFontSize(Math.round(Math.min(96, w * 0.1)));
   }
 
   clearPickups() {
@@ -467,6 +458,77 @@ export class PlaneScene extends Phaser.Scene {
     this.nextSpawnT = 0.08;
     this.spawnIndex = 0;
     this.skySpawned = false;
+    this.scatterDecor();
+  }
+
+  // The reference sky is littered with numbers and missiles that are never
+  // collected — they exist to make the sky feel busy while the world scrolls.
+  // Scenery is hung off the course rather than sprayed over the whole world, so
+  // it stays dense in frame without spawning thousands of unseen objects.
+  scatterDecor() {
+    this.decor?.forEach((d) => d.node.destroy());
+    this.decor = [];
+    const clear = Math.max(90, (this.plane?.displayWidth || 90) * 1.5);
+    const values = [1, 1, 2, 2, 2, 3, 5];
+
+    for (let i = 0; i < DECOR_NUMBERS; i += 1) {
+      const spot = this.corridorSpot(i * 3 + 5, clear, 0.6);
+      // Seeded well away from the offset seed, otherwise face value would track
+      // distance from the course and every nearby number would read "1".
+      const value = values[Math.floor(hashUnit(i * 7 + 1013) * values.length)];
+      this.decor.push({ node: this.numberLabel(spot.x, spot.y, String(value)) });
+    }
+
+    for (let i = 0; i < DECOR_ROCKETS; i += 1) {
+      const spot = this.corridorSpot(i * 5 + 41, clear * 1.6, 0.9);
+      const img = this.add
+        .image(spot.x, spot.y, 'rocket')
+        .setDisplaySize(74, 74)
+        .setAngle(186)
+        .setDepth(6);
+      this.decor.push({ node: img, drift: 26 + hashUnit(i * 5 + 43) * 34 });
+    }
+  }
+
+  // A point beside the course: spread along its length, offset above or below
+  // by at least `clear` so the plane can never brush it.
+  corridorSpot(seed, clear, spread) {
+    const { h, worldW } = this.world();
+    const x = hashUnit(seed) * worldW;
+    const base = this.courseYAtX(x);
+    const offset = clear + hashUnit(seed + 2) * h * spread;
+    const ceiling = -h * 0.08;
+    const below = base + offset;
+    // Where the course runs close to the water there is no room underneath it.
+    // Those points are mirrored above the course instead of being clamped, which
+    // would otherwise stack every one of them onto the waterline.
+    const under = hashUnit(seed + 1) >= 0.5 && below < ceiling;
+    return { x, y: under ? below : base - offset };
+  }
+
+  driftDecor(delta) {
+    if (!this.decor?.length) return;
+    const { worldW } = this.world();
+    for (const d of this.decor) {
+      if (!d.drift) continue;
+      d.node.x -= d.drift * (delta / 1000);
+      if (d.node.x < -120) d.node.x = worldW + 120;
+    }
+  }
+
+  // Plain white numeral with the short dark underline the reference uses.
+  numberLabel(x, y, value) {
+    const label = this.add
+      .text(0, 0, String(value).replace('.', ','), {
+        fontFamily: 'Manrope, Arial, sans-serif',
+        fontSize: '46px',
+        color: '#ffffff',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5)
+      .setShadow(0, 3, 'rgba(7,20,51,0.75)', 6, false, true);
+    const bar = this.add.rectangle(0, label.height * 0.42, label.width * 0.42, 5, 0x121a35, 0.85);
+    return this.add.container(x, y, [bar, label]).setDepth(6);
   }
 
   spawnAlongCourse() {
@@ -475,19 +537,13 @@ export class PlaneScene extends Phaser.Scene {
     this.pickups.removeAll(true);
     this.skySpawned = true;
     const events = skyEvents(this.roundMods);
-    const { h, horizon } = this.layout();
     events.forEach((ev, i) => {
       const t = Phaser.Math.Clamp(Number(ev.t) || 0.2, 0.06, 0.95);
       const path = this.pathAt(this.courseT(t));
       const side = i % 2 === 0 ? -1 : 1;
       const offset = (ev.kind === 'rocket' ? 16 : 9) + (i % 3) * 7;
-      const reach = ev.kind === 'rocket' ? 38 : 22;
       const x = path.x + path.nx * offset * side;
-      const y = Phaser.Math.Clamp(
-        path.y + path.ny * offset * side,
-        h * 0.03 + reach,
-        horizon - 24,
-      );
+      const y = path.y + path.ny * offset * side;
       if (ev.kind === 'rocket') this.addBomb(x, y, t, 0.5, t);
       else if (ev.kind === 'mul') this.addMultiplier(x, y, `x${ev.value}`, t);
       else this.addMultiplier(x, y, String(ev.value), t);
@@ -495,7 +551,7 @@ export class PlaneScene extends Phaser.Scene {
   }
 
   addBomb(x, y, t = 0, drop = 0.15, at = 1) {
-    const img = this.add.image(0, 0, 'rocket').setDisplaySize(72, 72).setAngle(-28);
+    const img = this.add.image(0, 0, 'rocket').setDisplaySize(72, 72).setAngle(186);
     const node = this.add.container(x, y, [img]).setDepth(7);
     this.pickups.add(node);
     this.items.push({
@@ -512,17 +568,7 @@ export class PlaneScene extends Phaser.Scene {
   }
 
   addMultiplier(x, y, value, t = 0) {
-    // The reference game shows plain white numerals with a soft drop shadow.
-    const label = this.add
-      .text(0, 0, String(value).replace('.', ','), {
-        fontFamily: 'Manrope, Arial, sans-serif',
-        fontSize: '44px',
-        color: '#ffffff',
-        fontStyle: 'bold',
-      })
-      .setOrigin(0.5)
-      .setShadow(0, 3, 'rgba(7,20,51,0.75)', 6, false, true);
-    const node = this.add.container(x, y, [label]).setDepth(7);
+    const node = this.numberLabel(x, y, value).setDepth(7);
     this.pickups.add(node);
     this.items.push({ type: 'mult', value, node, x, y, t, alive: true, bob: -10 });
   }
@@ -537,7 +583,7 @@ export class PlaneScene extends Phaser.Scene {
       if (!hit) continue;
       item.alive = false;
       if (item.type === 'mult') {
-        this.popup(item.node.x, item.node.y, String(item.value));
+        this.collectFlash(item.node.x, item.node.y, `×${String(item.value).replace('x', '')}`);
         this.tweens.add({
           targets: item.node,
           scale: 1.4,
@@ -557,6 +603,42 @@ export class PlaneScene extends Phaser.Scene {
         });
       }
     }
+  }
+
+  // Collected numbers burst as a white star with the multiplier written across
+  // it, matching the reference pickup effect.
+  collectFlash(x, y, text) {
+    const star = this.add.graphics().setDepth(8);
+    star.fillStyle(0xffffff, 0.92);
+    star.beginPath();
+    for (let i = 0; i < 16; i += 1) {
+      const a = (i / 16) * Math.PI * 2;
+      const r = i % 2 === 0 ? 30 : 12;
+      const px = Math.cos(a) * r;
+      const py = Math.sin(a) * r;
+      if (i === 0) star.moveTo(px, py);
+      else star.lineTo(px, py);
+    }
+    star.closePath();
+    star.fillPath();
+    const label = this.add
+      .text(0, 0, text, {
+        fontFamily: 'Manrope, Arial, sans-serif',
+        fontSize: '30px',
+        color: '#ffffff',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5)
+      .setShadow(0, 2, 'rgba(7,20,51,0.8)', 5, false, true);
+    const node = this.add.container(x, y, [star, label]).setDepth(8);
+    this.tweens.add({
+      targets: node,
+      scale: 1.5,
+      alpha: 0,
+      duration: 520,
+      ease: 'Sine.out',
+      onComplete: () => node.destroy(),
+    });
   }
 
   popup(x, y, text, color = '#ffe14a') {
@@ -603,24 +685,6 @@ export class PlaneScene extends Phaser.Scene {
     });
   }
 
-  // Dotted preview of the course just ahead of the plane, so the opening frame
-  // already shows where the flight is heading.
-  drawCourseGuide() {
-    const g = this.courseGuide;
-    if (!g) return;
-    g.clear();
-    if (this.phase === 'crashed' || this.phase === 'landed') return;
-    const from = this.launched ? this.flightT() : 0;
-    const steps = 24;
-    for (let i = 1; i <= steps; i += 1) {
-      const t = from + (i / steps) * 0.4;
-      if (t > 0.97) break;
-      const p = this.pathAt(t);
-      g.fillStyle(0xbfe0ff, 0.32 * (1 - i / steps));
-      g.fillCircle(p.x, p.y, 2.4);
-    }
-  }
-
   clearTrail() {
     this.trailPts = [];
     this.trailAcc = 0;
@@ -633,45 +697,55 @@ export class PlaneScene extends Phaser.Scene {
       return;
     }
     this.trailAcc += delta;
-    if (this.trailAcc < 40) return;
+    if (this.trailAcc < 55) return;
     this.trailAcc = 0;
-    this.trailPts.push({ x: this.plane.x - 18, y: this.plane.y + 6 });
-    if (this.trailPts.length > 14) this.trailPts.shift();
+    const back = this.plane.displayWidth * 0.5;
+    const n = this.trailSeq = (this.trailSeq || 0) + 1;
+    this.trailPts.push({
+      x: this.plane.x - back,
+      y: this.plane.y + 4 + (hashUnit(n + 61) - 0.5) * 10,
+      r: 6 + hashUnit(n + 3) * 8,
+    });
+    if (this.trailPts.length > 22) this.trailPts.shift();
   }
 
+  // Exhaust is a thinning chain of dark smoke puffs, not a drawn line.
   drawTrail() {
     if (!this.trail) return;
     this.trail.clear();
     if (this.activeEvent === 'clouds') return;
-    if (this.trailPts.length < 2) return;
     const n = this.trailPts.length;
+    if (!n) return;
     const boost = this.activeEvent === 'boost';
-    this.trail.lineStyle(boost ? 5 : 3, boost ? 0xff7a2a : 0xffe27a, boost ? 0.55 : 0.35);
-    this.trail.beginPath();
-    this.trail.moveTo(this.trailPts[0].x, this.trailPts[0].y);
-    for (let i = 1; i < n; i += 1) {
-      this.trail.lineTo(this.trailPts[i].x, this.trailPts[i].y);
-    }
-    this.trail.strokePath();
-    for (let i = 0; i < n; i += 2) {
+    for (let i = 0; i < n; i += 1) {
       const p = this.trailPts[i];
-      this.trail.fillStyle(0xffffff, 0.08 + (i / n) * 0.22);
-      this.trail.fillCircle(p.x, p.y, 2 + (i / n) * 3);
+      const age = i / n;
+      this.trail.fillStyle(boost ? 0xff8a3a : 0x6b6152, 0.1 + age * 0.4);
+      this.trail.fillCircle(p.x, p.y, p.r * (0.45 + age * 0.75));
     }
   }
 
-  drawClouds(now) {
+  // Cloud heights are fixed at layout time: they drift far too slowly for the
+  // course height under them to change, and resampling it every frame for every
+  // cloud would cost more than the whole backdrop.
+  layoutClouds() {
     if (!this.cloudSprites?.length) return;
-    const { w, horizon } = this.layout();
+    const { w } = this.world();
+    this.cloudSeeds = this.cloudSprites.map((cloud, i) => {
+      const width = Math.max(40, w * 0.055 * (0.55 + hashUnit(i + 11) * 0.8));
+      cloud.setDisplaySize(width, width * 0.42);
+      const spot = this.corridorSpot(i * 7 + 101, width * 0.8, 1.15);
+      return { width, y: spot.y, home: spot.x, drift: 5 + hashUnit(i + 21) * 14 };
+    });
+  }
+
+  drawClouds(now) {
+    if (!this.cloudSeeds?.length) return;
+    const { worldW } = this.world();
     this.cloudSprites.forEach((cloud, i) => {
       const seed = this.cloudSeeds[i];
-      const width = Math.max(34, w * 0.052 * seed.size);
-      cloud.setDisplaySize(width, width * 0.42);
-      const span = w + width * 2;
-      cloud.setPosition(
-        ((seed.x * span + now * seed.drift) % span) - width,
-        horizon * (0.05 + seed.y * 0.82),
-      );
+      const span = worldW + seed.width * 2;
+      cloud.setPosition(((seed.home + now * seed.drift) % span) - seed.width, seed.y);
     });
   }
 
@@ -708,69 +782,76 @@ export class PlaneScene extends Phaser.Scene {
   }
 
   update(_time, delta) {
-    const { w, h, horizon } = this.layout();
     const now = _time / 1000;
     this.tick += 1;
-    if ((this.tick & 1) === 1) {
-      this.sparkles.clear();
-      for (const d of this.dots) {
-        const x = (d.x * w + now * d.s * 12) % w;
-        const y = horizon + 8 + d.y * (h - horizon - 16);
-        this.sparkles.fillStyle(0xffffff, 0.25 + Math.abs(Math.sin(now * d.s)) * 0.45);
-        this.sparkles.fillCircle(x, y, d.r);
-      }
-    }
+    if ((this.tick & 1) === 1) this.drawSparkles(now);
 
     this.pushTrail(delta);
     if ((this.tick & 1) === 0) this.drawTrail();
-    if ((this.tick & 3) === 0) this.drawCourseGuide();
     this.drawClouds(now);
+    this.driftDecor(delta);
     this.bobPickups(now);
     this.maybeCollectRing();
-    this.updateCamera(delta);
 
-    if (this.control !== 'auto' || !this.plane) return;
-
-    const follow = 1 - Math.pow(0.0008, delta / 1000);
-    if (!this.launched || this.phase === 'waiting') {
-      const start = this.startPoint();
-      this.smooth.x = lerp(this.smooth.x, start.x, follow);
-      this.smooth.y = lerp(this.smooth.y, start.y, follow);
-      this.smooth.angle = lerp(this.smooth.angle, -20, follow);
-    } else if (this.phase === 'takeoff') {
-      const point = this.pathAt(0.16);
-      this.smooth.x = lerp(this.smooth.x, point.x, follow * 0.9);
-      this.smooth.y = lerp(this.smooth.y, point.y, follow * 0.9);
-      this.smooth.angle = lerp(this.smooth.angle, point.angle, follow * 0.55);
-      this.collectNearby();
-    } else if (this.phase === 'flying') {
-      this.visualM = lerp(
-        this.visualM,
-        this.displayM,
-        this.displayM < this.visualM - 0.01 ? 1 - Math.pow(0.02, delta / 16.67) : 1 - Math.pow(0.08, delta / 16.67),
-      );
-      this.visualCourse = lerp(
-        this.visualCourse,
-        this.courseM,
-        1 - Math.pow(0.08, delta / 16.67),
-      );
-      const point = this.pathAt(this.flightT());
-      this.smooth.x = lerp(this.smooth.x, point.x, follow * 0.9);
-      this.smooth.y = lerp(this.smooth.y, point.y, follow * 0.9);
-      this.smooth.angle = lerp(this.smooth.angle, point.angle, follow * 0.55);
-      if (this.activeEvent === 'turbulence') {
-        this.smooth.x += Math.sin(now * 28) * 5;
-        this.smooth.y += Math.cos(now * 21) * 4;
+    if (this.control === 'auto' && this.plane) {
+      const follow = 1 - Math.pow(0.0008, delta / 1000);
+      if (!this.launched || this.phase === 'waiting') {
+        const start = this.startPoint();
+        this.smooth.x = lerp(this.smooth.x, start.x, follow);
+        this.smooth.y = lerp(this.smooth.y, start.y, follow);
+        this.smooth.angle = lerp(this.smooth.angle, -20, follow);
+      } else if (this.phase === 'takeoff') {
+        const point = this.pathAt(0.16);
+        this.smooth.x = lerp(this.smooth.x, point.x, follow * 0.9);
+        this.smooth.y = lerp(this.smooth.y, point.y, follow * 0.9);
+        this.smooth.angle = lerp(this.smooth.angle, point.angle, follow * 0.55);
+        this.collectNearby();
+      } else if (this.phase === 'flying') {
+        this.visualM = lerp(
+          this.visualM,
+          this.displayM,
+          this.displayM < this.visualM - 0.01 ? 1 - Math.pow(0.02, delta / 16.67) : 1 - Math.pow(0.08, delta / 16.67),
+        );
+        this.visualCourse = lerp(
+          this.visualCourse,
+          this.courseM,
+          1 - Math.pow(0.08, delta / 16.67),
+        );
+        const point = this.pathAt(this.flightT());
+        this.smooth.x = lerp(this.smooth.x, point.x, follow * 0.9);
+        this.smooth.y = lerp(this.smooth.y, point.y, follow * 0.9);
+        this.smooth.angle = lerp(this.smooth.angle, point.angle, follow * 0.55);
+        if (this.activeEvent === 'turbulence') {
+          this.smooth.x += Math.sin(now * 28) * 5;
+          this.smooth.y += Math.cos(now * 21) * 4;
+        }
+        this.collectNearby();
+      } else if (this.phase === 'landed') {
+        const land = this.landPoint();
+        this.smooth.x = lerp(this.smooth.x, land.x, follow);
+        this.smooth.y = lerp(this.smooth.y, land.y, follow);
+        this.smooth.angle = lerp(this.smooth.angle, -16, follow);
       }
-      this.collectNearby();
-    } else if (this.phase === 'landed') {
-      const land = this.landPoint();
-      this.smooth.x = lerp(this.smooth.x, land.x, follow);
-      this.smooth.y = lerp(this.smooth.y, land.y, follow);
-      this.smooth.angle = lerp(this.smooth.angle, -16, follow);
+      this.placeFromSmooth();
     }
 
-    this.placeFromSmooth();
+    this.updateCamera(delta);
+  }
+
+  // Glints on the water, drawn only across the stretch the camera can see.
+  drawSparkles(now) {
+    const { h, worldW, seaBottom } = this.world();
+    const view = this.cameras.main.worldView;
+    this.sparkles.clear();
+    if (!view || view.bottom < 0) return;
+    for (const d of this.dots) {
+      const x = (d.x * worldW + now * d.s * 12) % worldW;
+      if (x < view.x - 40 || x > view.right + 40) continue;
+      // Glints crowd just under the waterline and thin out towards the viewer.
+      const y = 8 + Math.pow(d.y, 2.2) * (seaBottom - 16);
+      this.sparkles.fillStyle(0xffffff, 0.25 + Math.abs(Math.sin(now * d.s + d.y * 6)) * 0.45);
+      this.sparkles.fillCircle(x, y, d.r * (1 + (1 - d.y) * 0.4) * (h / 900));
+    }
   }
 
   clearRoundFx() {
@@ -799,7 +880,6 @@ export class PlaneScene extends Phaser.Scene {
     else this.plane?.clearTint();
     const events = skyEvents(mod);
     this.roundWave = waveFor(events);
-    this.waveCap = this.waveHeadroom();
     if (events.length) this.spawnAlongCourse();
     else this.clearPickups();
     if (mod?.ringAt) {
@@ -858,6 +938,10 @@ export class PlaneScene extends Phaser.Scene {
       this.clearPickups();
       this.clearTrail();
       this.stopMotion();
+      const start = this.startPoint();
+      this.smooth.x = start.x;
+      this.smooth.y = start.y;
+      this.updateCamera(0, true);
       if (prev !== 'waiting') this.appearPlane();
       else this.plane?.setAlpha(1);
     }
@@ -1003,15 +1087,17 @@ export class PlaneScene extends Phaser.Scene {
     this.phase = 'crashed';
     this.control = 'tween';
     this.clearTrail();
-    const { horizon } = this.layout();
-    const splash = { x: this.plane.x + 36, y: horizon + 18 };
+    const fall = Math.max(0, 18 - this.plane.y);
+    const splash = { x: this.plane.x + Math.max(36, fall * 0.22), y: 18 };
     this.stopMotion();
     this.tweens.add({
       targets: this.plane,
       x: splash.x,
       y: splash.y,
       angle: 28,
-      duration: 420,
+      // A dive from cruising height covers far more ground than one off the
+      // deck, so the fall is timed by distance instead of a fixed beat.
+      duration: Phaser.Math.Clamp(Math.round(fall * 0.9), 420, 1500),
       ease: 'Quad.in',
       onUpdate: () => {
         this.smooth.x = this.plane.x;
@@ -1020,14 +1106,14 @@ export class PlaneScene extends Phaser.Scene {
         this.syncLabel(24);
       },
       onComplete: () => {
-        this.popup(splash.x, horizon - 10, 'В воду!', '#ff8b8b');
+        this.popup(splash.x, -10, 'В воду!', '#ff8b8b');
         this.tweens.add({
           targets: this.plane,
           alpha: 0,
           y: splash.y + 40,
           duration: 380,
         });
-        const ring = this.add.ellipse(splash.x, horizon + 4, 10, 4, 0xffffff, 0.5).setDepth(7);
+        const ring = this.add.ellipse(splash.x, 4, 10, 4, 0xffffff, 0.5).setDepth(7);
         this.tweens.add({
           targets: ring,
           scaleX: 8,
