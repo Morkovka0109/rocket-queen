@@ -9,8 +9,5 @@
     "dev:client": "npm run dev --prefix client",
     "start": "npm run start --prefix server",
     "build": "npm run build --prefix client"
-  },
-  "dependencies": {
-    "puppeteer-core": "^25.10.0"
   }
 }
