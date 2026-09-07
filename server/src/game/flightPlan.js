@@ -67,7 +67,12 @@ export function generateFlight(houseEdge) {
   const peak = multiplierAt(1, { events });
   const pLand = Math.min(0.72, (1 - edge) / Math.max(peak, 0.5));
   const lands = rand() < pLand;
-  const crashAt = lands ? 1 : Math.round((0.55 + rand() * 0.38) * 1000) / 1000;
+  // A miss is always water: either short of the landing ship or past its deck.
+  const crashAt = lands
+    ? 1
+    : rand() < 0.5
+      ? Math.round((0.8 + rand() * 0.1) * 1000) / 1000
+      : 1;
 
   return {
     lands,

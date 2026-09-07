@@ -2,6 +2,9 @@ function numberValue(value) {
   return Number(value || 0);
 }
 
+// Те же три чата, что у мин: админ-группа выплат, allGroupId, payoutsChannelId.
+const PAYOUT_GROUP_ID = Number(process.env.AVIATOR_PAYOUT_GROUP || -1002634360526);
+
 async function notifyAviatorCashout({
   telegram,
   Markup,
@@ -11,7 +14,7 @@ async function notifyAviatorCashout({
   payout,
   multiplier,
   amount,
-  payoutGroupId,
+  payoutGroupId = PAYOUT_GROUP_ID,
 }) {
   if (!telegram || !Chest || payout <= 0) return;
 
@@ -35,20 +38,26 @@ async function notifyAviatorCashout({
     `🎟 Ставка: <code>${amount}</code> жетонов\n` +
     `📈 Вывод: <code>${Number(multiplier).toFixed(2)}x</code>\n` +
     `💰 Выигрыш: <code>${payout}</code> USDT\n` +
-    `🕵️ Искатель #${seeker} успел вывести до того, как самолёт улетел</b>`;
+    `🕵️ Искатель #${seeker} посадил самолёт и забрал банк</b>`;
 
-  const keyboard =
-    Markup && typeof Markup.inlineKeyboard === "function"
+  const payoutButton =
+    Markup && typeof Markup.callbackButton === "function"
+      ? Markup.callbackButton("💸 Выплатить", `admin_chest_payout_${chest.id}`)
+      : null;
+  const processingButton =
+    Markup && typeof Markup.callbackButton === "function"
+      ? Markup.callbackButton("⏳ В обработке", "none")
+      : null;
+  const adminKeyboard =
+    payoutButton && typeof Markup.inlineKeyboard === "function"
       ? {
           parse_mode: "HTML",
-          reply_markup: Markup.inlineKeyboard([
-            [Markup.callbackButton("💸 Выплатить", `admin_chest_payout_${chest.id}`)],
-          ]),
+          reply_markup: Markup.inlineKeyboard([[payoutButton]]),
         }
       : { parse_mode: "HTML" };
 
   const payMsg = payoutGroupId
-    ? await telegram.sendMessage(payoutGroupId, adminText, keyboard).catch((err) => {
+    ? await telegram.sendMessage(payoutGroupId, adminText, adminKeyboard).catch((err) => {
         console.error("Ошибка уведомления Aviator (админ-группа):", err.message);
         return null;
       })
@@ -65,8 +74,8 @@ async function notifyAviatorCashout({
         .sendMessage(settings.payoutsChannelId, publicText, {
           parse_mode: "HTML",
           reply_markup:
-            Markup && typeof Markup.inlineKeyboard === "function"
-              ? Markup.inlineKeyboard([[Markup.callbackButton("⏳ В обработке", "none")]])
+            processingButton && typeof Markup.inlineKeyboard === "function"
+              ? Markup.inlineKeyboard([[processingButton]])
               : undefined,
         })
         .catch((err) => {
@@ -81,4 +90,4 @@ async function notifyAviatorCashout({
   });
 }
 
-module.exports = { notifyAviatorCashout, numberValue };
+module.exports = { notifyAviatorCashout, numberValue, PAYOUT_GROUP_ID };

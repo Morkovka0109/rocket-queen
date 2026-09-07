@@ -40,9 +40,9 @@ function initDataFromRequest(req) {
   const directHeader = req.get("X-Telegram-Init-Data");
   if (directHeader) return directHeader;
   const authorization = req.get("Authorization") || "";
-  return authorization.startsWith("Bearer ")
-    ? authorization.slice("Bearer ".length)
-    : "";
+  if (authorization.startsWith("Bearer ")) return authorization.slice("Bearer ".length);
+  if (typeof req.body?.initData === "string" && req.body.initData) return req.body.initData;
+  return "";
 }
 
 module.exports = { telegramUserFromInitData, initDataFromRequest };

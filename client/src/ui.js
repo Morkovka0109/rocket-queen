@@ -1,5 +1,6 @@
 import { createChart } from './chart.js';
 import { t } from './i18n.js';
+import { getAudio } from './audio.js';
 
 function fan(value) {
   return `${Number(value).toFixed(2).replace('.', ',')} ФАН`;
@@ -31,15 +32,23 @@ export function bindApp(root) {
     fxDim: root.querySelector('#fx-dim'),
     eventBanner: root.querySelector('#event-banner'),
     streakChip: root.querySelector('#streak-chip'),
+    roundOverlay: root.querySelector('#round-overlay'),
+    roundTitle: root.querySelector('#round-title'),
+    roundAmount: root.querySelector('#round-amount'),
+    roundContinue: root.querySelector('#round-continue'),
     speeds: [...root.querySelectorAll('.speed')],
+    sound: root.querySelector('#sound-btn'),
   };
 
   const chart = createChart(els.canvas);
+  const audio = getAudio();
   let betAmount = 1;
   let speed = 2;
   let playHandler = null;
   let bonusHandler = null;
   let speedHandler = null;
+  let collectHandler = null;
+  let overlayKind = 'continue';
   let myCents = 0;
   let targetMult = 1;
   let shownMult = 1;
@@ -61,6 +70,49 @@ export function bindApp(root) {
   } catch {
     /* ignore */
   }
+
+  const hideOverlay = () => {
+    if (!els.roundOverlay) return;
+    els.roundOverlay.hidden = true;
+  };
+
+  const showOverlay = ({ title, amount, action, kind }) => {
+    if (!els.roundOverlay) return;
+    overlayKind = kind || 'continue';
+    els.roundTitle.textContent = title;
+    if (amount) {
+      els.roundAmount.hidden = false;
+      els.roundAmount.textContent = amount;
+    } else {
+      els.roundAmount.hidden = true;
+      els.roundAmount.textContent = '';
+    }
+    els.roundContinue.textContent = action;
+    els.roundOverlay.hidden = false;
+  };
+
+  els.roundContinue?.addEventListener('click', () => {
+    audio.click();
+    if (overlayKind === 'cashout') {
+      collectHandler?.();
+      return;
+    }
+    hideOverlay();
+  });
+
+  const syncSoundBtn = () => {
+    if (!els.sound) return;
+    els.sound.classList.toggle('is-muted', audio.muted);
+    els.sound.setAttribute('aria-label', audio.muted ? t.soundOff : t.soundOn);
+  };
+  syncSoundBtn();
+  root.addEventListener('pointerdown', () => audio.unlock(), true);
+  els.sound?.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    audio.unlock();
+    audio.toggleMute();
+    syncSoundBtn();
+  });
 
   const persist = () => {
     try {
@@ -141,17 +193,20 @@ export function bindApp(root) {
   };
 
   els.betUp.addEventListener('click', () => {
+    audio.click();
     betAmount = Math.min(500, Math.round((betAmount + 1) * 100) / 100);
     persist();
     renderBet();
   });
   els.betDown.addEventListener('click', () => {
+    audio.click();
     betAmount = Math.max(1, Math.round((betAmount - 1) * 100) / 100);
     persist();
     renderBet();
   });
   for (const btn of els.speeds) {
     btn.addEventListener('click', () => {
+      audio.click();
       speed = Number(btn.dataset.speed);
       persist();
       renderSpeeds();
@@ -160,8 +215,15 @@ export function bindApp(root) {
     });
   }
   chart.setSpeed(speed);
-  els.play.addEventListener('click', () => playHandler?.());
-  els.bonus.addEventListener('click', () => bonusHandler?.());
+  els.play.addEventListener('click', () => {
+    audio.unlock();
+    audio.click();
+    playHandler?.();
+  });
+  els.bonus.addEventListener('click', () => {
+    audio.click();
+    bonusHandler?.();
+  });
   if (els.leadersBtn && els.leaders) {
     els.leadersBtn.addEventListener('click', () => {
       els.leaders.hidden = !els.leaders.hidden;
@@ -201,6 +263,9 @@ export function bindApp(root) {
   return {
     onPlay(fn) {
       playHandler = fn;
+    },
+    onCollect(fn) {
+      collectHandler = fn;
     },
     onAutoCashoutChange() {},
     onBonus(fn) {
@@ -284,6 +349,7 @@ export function bindApp(root) {
       writeBanner(null);
     },
     launchPlane() {
+      hideOverlay();
       chart.launch();
     },
     isLaunched() {
@@ -294,23 +360,42 @@ export function bindApp(root) {
     },
     setCrashed(point, reason) {
       const n = Number(point) || 1;
-      chart.crash(n);
       targetMult = n;
       shownMult = n;
       writeMult(n);
-      els.label.textContent = t.crashReason[reason] || t.flewAway;
-      bang(els.fxLose, 'is-on', 700);
+      els.label.classList.remove('is-win');
+      chart.crash(n, () => {
+        showOverlay({ title: t.defeat, action: t.again, kind: 'again' });
+        bang(els.fxLose, 'is-on', 700);
+      });
     },
-    land(payoutCents) {
+    land(payoutCents, { collect = true } = {}) {
       const won = Number(payoutCents);
-      const text = Number.isFinite(won) && won > 0 ? t.won(fan(won / 100)) : t.landed;
-      chart.land();
+      const amount = Number.isFinite(won) && won > 0 ? fan(won / 100) : '';
       els.app.dataset.phase = 'landed';
-      els.label.textContent = text;
+      els.label.textContent = amount || t.landed;
       els.label.classList.remove('is-win');
       void els.label.offsetWidth;
       els.label.classList.add('is-win');
-      bang(els.fxFlash, 'is-on', 450);
+      chart.land(() => {
+        showOverlay({
+          title: t.victory,
+          amount,
+          action: collect ? t.cashout : t.continue,
+          kind: collect ? 'cashout' : 'continue',
+        });
+        bang(els.fxFlash, 'is-on', 450);
+      });
+    },
+    markCollected(payoutCents) {
+      const won = Number(payoutCents);
+      const amount = Number.isFinite(won) && won > 0 ? fan(won / 100) : '';
+      if (amount) {
+        els.roundAmount.hidden = false;
+        els.roundAmount.textContent = amount;
+      }
+      overlayKind = 'continue';
+      if (els.roundContinue) els.roundContinue.textContent = t.continue;
     },
     setHistory(list) {
       history.length = 0;
@@ -326,6 +411,7 @@ export function bindApp(root) {
       myCents = 0;
       els.label.classList.remove('is-win');
       els.label.textContent = fan(betAmount);
+      hideOverlay();
     },
     setMyBetCents(cents) {
       myCents = cents;

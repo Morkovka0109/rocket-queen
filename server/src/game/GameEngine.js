@@ -70,9 +70,8 @@ export class GameEngine extends EventEmitter {
         userId: session.userId,
         slot: 0,
         amountCents: session.amountCents,
-        cashedOut: session.phase === PHASE.LANDED,
-        cashoutHundredths:
-          session.phase === PHASE.LANDED ? toHundredths(session.finalMult) : null,
+        cashedOut: Boolean(session.paid),
+        cashoutHundredths: session.paid ? toHundredths(session.finalMult) : null,
       });
     }
     return bets;
@@ -99,6 +98,7 @@ export class GameEngine extends EventEmitter {
       durationMs,
       finalMult: 1,
       cashedOut: false,
+      paid: false,
     };
     this.sessions.set(id, session);
     this._ensureTicker();
@@ -151,10 +151,16 @@ export class GameEngine extends EventEmitter {
     this._tickTimer = setInterval(() => this._onTick(), this.tickMs);
   }
 
+  _endProgress(session) {
+    if (session.plan.lands) return 1;
+    const at = Number(session.plan.crashAt);
+    if (!Number.isFinite(at)) return 1;
+    return Math.min(1, Math.max(0.75, at));
+  }
+
   _progressOf(session) {
     const raw = (Date.now() - session.startedAt) / session.durationMs;
-    const cap = session.plan.lands ? 1 : session.plan.crashAt;
-    return Math.min(Math.max(raw, 0), cap);
+    return Math.min(Math.max(raw, 0), this._endProgress(session));
   }
 
   _onTick() {
@@ -173,13 +179,10 @@ export class GameEngine extends EventEmitter {
           course: progress,
           serverTime: now,
         });
-        if (progress >= (session.plan.lands ? 1 : session.plan.crashAt) - 1e-6) {
+        if (progress >= this._endProgress(session) - 1e-6) {
           this._finish(session);
         }
-      } else if (
-        (session.phase === PHASE.CRASHED || session.phase === PHASE.LANDED) &&
-        now - session.endedAt >= this.crashDisplayMs
-      ) {
+      } else if (this._canClear(session, now)) {
         this.sessions.delete(session.userId);
         this.emit('waiting', {
           userId: session.userId,
@@ -187,6 +190,58 @@ export class GameEngine extends EventEmitter {
         });
       }
     }
+  }
+
+  _canClear(session, now) {
+    if (!session.endedAt || now - session.endedAt < this.crashDisplayMs) return false;
+    if (session.phase === PHASE.CRASHED) return true;
+    return session.phase === PHASE.LANDED && session.paid;
+  }
+
+  forfeit(userId) {
+    const session = this.sessions.get(String(userId));
+    if (!session) return { ok: true };
+    if (session.phase === PHASE.FLYING || (session.phase === PHASE.LANDED && !session.paid)) {
+      this.sessions.delete(String(userId));
+      this.streaks.set(String(userId), 0);
+    }
+    return { ok: true };
+  }
+
+  cashOut(userId, gameId) {
+    const session = this.sessions.get(String(userId));
+    if (!session) return { ok: false, error: 'Нет активного полёта' };
+    if (gameId && String(session.roundId) !== String(gameId)) {
+      return { ok: false, error: 'Игра не найдена' };
+    }
+    if (session.paid) return { ok: false, error: 'Выигрыш уже забран' };
+    if (session.phase === PHASE.CRASHED) {
+      return { ok: false, error: 'Самолёт упал в воду' };
+    }
+    if (session.phase !== PHASE.LANDED) {
+      return { ok: false, error: 'Забрать можно после посадки' };
+    }
+    const multiplier = session.finalMult;
+    const payoutCents = Math.floor((session.amountCents * toHundredths(multiplier)) / 100);
+    if (payoutCents <= 0) return { ok: false, error: 'Нечего забирать' };
+    session.paid = true;
+    session.cashedOut = true;
+    session.endedAt = Date.now();
+    return {
+      ok: true,
+      userId: session.userId,
+      roundId: session.roundId,
+      amountCents: session.amountCents,
+      multiplier,
+      payoutCents,
+    };
+  }
+
+  undoCashOut(userId) {
+    const session = this.sessions.get(String(userId));
+    if (!session || session.phase !== PHASE.LANDED) return;
+    session.paid = false;
+    session.cashedOut = false;
   }
 
   _finish(session) {
@@ -197,7 +252,8 @@ export class GameEngine extends EventEmitter {
 
     if (session.plan.lands) {
       session.phase = PHASE.LANDED;
-      session.cashedOut = true;
+      session.cashedOut = false;
+      session.paid = false;
       const streak = (this.streaks.get(session.userId) || 0) + 1;
       this.streaks.set(session.userId, streak);
       const payoutCents = Math.floor((session.amountCents * toHundredths(multiplier)) / 100);
@@ -210,6 +266,7 @@ export class GameEngine extends EventEmitter {
         crashPoint: multiplier,
         multiplier,
         payoutCents,
+        paid: false,
         amountCents: session.amountCents,
         history: this.history,
         streak,
@@ -218,6 +275,7 @@ export class GameEngine extends EventEmitter {
       });
     } else {
       session.phase = PHASE.CRASHED;
+      session.paid = false;
       this.streaks.set(session.userId, 0);
       this.history.unshift(0);
       if (this.history.length > 24) this.history.length = 24;
@@ -237,7 +295,7 @@ export class GameEngine extends EventEmitter {
 
   _publicSession(session) {
     const progress =
-      session.phase === PHASE.FLYING ? this._progressOf(session) : session.plan.lands ? 1 : session.plan.crashAt;
+      session.phase === PHASE.FLYING ? this._progressOf(session) : this._endProgress(session);
     const multiplier =
       session.phase === PHASE.FLYING ? multiplierAt(progress, session.plan) : session.finalMult;
     return {
@@ -251,6 +309,12 @@ export class GameEngine extends EventEmitter {
       roundEvents: publicFlight(session.plan),
       crashPoint: session.phase === PHASE.CRASHED || session.phase === PHASE.LANDED ? session.finalMult : undefined,
       reason: session.phase === PHASE.CRASHED ? 'crash' : undefined,
+      paid: Boolean(session.paid),
+      payoutCents:
+        session.phase === PHASE.LANDED
+          ? Math.floor((session.amountCents * toHundredths(session.finalMult)) / 100)
+          : 0,
+      canCashout: session.phase === PHASE.LANDED && !session.paid,
     };
   }
 }

@@ -21,6 +21,7 @@ module.exports = (sequelize, DataTypes) => {
       waitMs: {
         type: DataTypes.INTEGER,
         allowNull: false,
+        defaultValue: 0,
       },
       startedAt: {
         type: DataTypes.DATE,

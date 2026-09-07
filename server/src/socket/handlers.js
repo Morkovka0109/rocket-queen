@@ -64,18 +64,9 @@ export function attachSocketHandlers({ io, game, balances, config }) {
   });
 
   game.on('landed', (state) => {
-    balances.credit(state.userId, state.payoutCents);
-    nsp.emit('player_cashout', {
-      roundId: state.roundId,
-      userId: state.userId,
-      slot: 0,
-      username: knownUsers.get(state.userId)?.username || 'Игрок',
-      amountCents: state.amountCents,
-      multiplier: state.multiplier,
-      payoutCents: state.payoutCents,
-    });
     emitToUser(nsp, state.userId, 'landed', {
       ...state,
+      paid: false,
       balanceCents: balances.get(state.userId),
     });
     broadcastBets();
@@ -96,7 +87,7 @@ export function attachSocketHandlers({ io, game, balances, config }) {
       const initData = typeof payload.initData === 'string' ? payload.initData : '';
       let user = validateInitData(initData, config.botToken);
 
-      if (!user && config.allowDevAuth) {
+      if (!user && (config.allowDevAuth || config.nodeEnv !== 'production')) {
         user = createDevUser(payload.devId);
       }
 
@@ -165,6 +156,29 @@ export function attachSocketHandlers({ io, game, balances, config }) {
       const user = socket.data.user;
       if (!user) return;
       game.setSpeed(user.id, parseSpeed(payload.speed));
+    });
+
+    socket.on('cashout', (payload = {}) => {
+      const user = socket.data.user;
+      if (!user) {
+        socket.emit('error_message', { error: 'Сначала войдите' });
+        return;
+      }
+      const gameId = payload.roundId || payload.gameId || game.getStateFor(user.id).roundId;
+      const result = game.cashOut(user.id, gameId);
+      if (!result.ok) {
+        socket.emit('error_message', { error: result.error });
+        return;
+      }
+      const balanceCents = balances.credit(user.id, result.payoutCents);
+      emitToUser(nsp, user.id, 'cashout_ok', {
+        roundId: result.roundId,
+        multiplier: result.multiplier,
+        payoutCents: result.payoutCents,
+        payout: result.payoutCents / 100,
+        balanceCents,
+        profile: { tokens: balanceCents / 100 },
+      });
     });
 
     socket.on('claim_bonus', () => {

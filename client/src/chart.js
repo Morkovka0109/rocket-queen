@@ -11,9 +11,9 @@ export function createChart(parent) {
     audio: { noAudio: true },
     banner: false,
     fps: {
-      target: 45,
-      min: 24,
-      smoothStep: true,
+      target: 60,
+      min: 30,
+      smoothStep: false,
     },
     render: {
       antialias: true,
@@ -61,11 +61,11 @@ export function createChart(parent) {
     setProgress(p) {
       scene.setProgress(p);
     },
-    crash(point) {
-      scene.crash(point);
+    crash(point, onSettled) {
+      scene.crash(point, onSettled);
     },
-    land() {
-      scene.land();
+    land(onSettled) {
+      scene.land(onSettled);
     },
     reset() {
       scene.setPhase('waiting');

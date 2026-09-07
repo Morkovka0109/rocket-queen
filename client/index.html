@@ -22,6 +22,16 @@
     <div id="boot-screen" class="boot-screen">Авиатор</div>
     <div id="app" class="app" data-phase="waiting" data-mode="launch">
       <header class="topbar">
+        <button id="sound-btn" class="icon-btn" type="button" aria-label="Звук">
+          <svg class="sound-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M4 10v4h3.2L12 18V6L7.2 10H4z" />
+            <path d="M16 9.2a4.2 4.2 0 0 1 0 5.6M18.4 7a7 7 0 0 1 0 10" />
+          </svg>
+          <svg class="sound-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M4 10v4h3.2L12 18V6L7.2 10H4z" />
+            <path d="M16.2 9.8 20 13.6M20 9.8l-3.8 3.8" />
+          </svg>
+        </button>
         <button id="menu-btn" class="icon-btn" type="button" aria-label="Меню">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
             <path d="M5 7h14M5 12h14M5 17h14" />
@@ -37,6 +47,11 @@
         <p id="event-banner" class="event-banner" hidden></p>
         <p id="streak-chip" class="streak-chip" hidden></p>
         <p id="plane-label" class="plane-label">1,00 ФАН</p>
+        <div id="round-overlay" class="round-overlay" hidden>
+          <p id="round-title" class="round-title"></p>
+          <p id="round-amount" class="round-amount" hidden></p>
+          <button id="round-continue" class="round-continue" type="button"></button>
+        </div>
       </section>
 
       <footer class="dash">

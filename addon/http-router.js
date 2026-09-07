@@ -17,7 +17,7 @@ async function createPlayer(User, telegramUser) {
   return user;
 }
 
-function createHttpRouter({ models, botToken, game, config }) {
+function createHttpRouter({ models, botToken, game, config, economy }) {
   const { User, AviatorRound, AviatorBet } = models;
   const router = express.Router();
 
@@ -52,6 +52,101 @@ function createHttpRouter({ models, botToken, game, config }) {
   router.get("/aviator/me", async (req, res) => {
     const user = await requirePlayer(req, res);
     if (user) res.json(serializeProfile(user));
+  });
+
+  router.post("/aviator/games", async (req, res) => {
+    const user = await requirePlayer(req, res);
+    if (!user) return;
+    try {
+      const result = await economy.startGame(user, {
+        amount: req.body?.amount,
+        speed: req.body?.speed,
+      });
+      if (!result.ok) {
+        res.status(result.status || 400).json({
+          error: result.error,
+          code: result.code,
+          balance: result.balance,
+        });
+        return;
+      }
+      res.status(201).json({
+        game: result.game,
+        profile: result.profile,
+      });
+    } catch (error) {
+      console.error("Aviator POST /games:", error);
+      res.status(500).json({ error: "Не удалось запустить самолёт" });
+    }
+  });
+
+  router.get("/aviator/games/active", async (req, res) => {
+    const user = await requirePlayer(req, res);
+    if (!user) return;
+    const bet = await AviatorBet.findOne({
+      where: { userId: user.id, status: "pending" },
+      order: [["createdAt", "DESC"]],
+    });
+    if (!bet) {
+      res.json({ game: null });
+      return;
+    }
+    res.json({
+      game: {
+        id: bet.roundId,
+        status: "active",
+        amount: numberValue(bet.amount),
+        ...game.getStateFor(user.id),
+      },
+    });
+  });
+
+  router.get("/aviator/games/:gameId", async (req, res) => {
+    const user = await requirePlayer(req, res);
+    if (!user) return;
+    let bet = await AviatorBet.findOne({
+      where: { roundId: req.params.gameId, userId: user.id },
+    });
+    if (!bet) {
+      bet = await AviatorBet.findOne({
+        where: { id: req.params.gameId, userId: user.id },
+      });
+    }
+    if (!bet) {
+      res.status(404).json({ error: "Игра не найдена" });
+      return;
+    }
+    res.json({
+      id: bet.roundId,
+      status: bet.status,
+      amount: numberValue(bet.amount),
+      payout: numberValue(bet.payout),
+      multiplier: bet.cashoutMultiplier == null ? null : numberValue(bet.cashoutMultiplier),
+      ...game.getStateFor(user.id),
+    });
+  });
+
+  router.post("/aviator/games/:gameId/cashout", async (req, res) => {
+    const user = await requirePlayer(req, res);
+    if (!user) return;
+    try {
+      const result = await economy.cashOutGame(user, req.params.gameId);
+      if (!result.ok) {
+        res.status(result.status || 400).json({ error: result.error });
+        return;
+      }
+      res.json({
+        result: result.result,
+        prize: result.prize,
+        paidOut: result.paidOut,
+        multiplier: result.multiplier,
+        game: result.game,
+        profile: result.profile,
+      });
+    } catch (error) {
+      console.error("Aviator POST /games/:id/cashout:", error);
+      res.status(500).json({ error: "Не удалось забрать выигрыш" });
+    }
   });
 
   router.get("/aviator/state", (_req, res) => {

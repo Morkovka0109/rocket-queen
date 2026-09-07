@@ -15,7 +15,7 @@ function loadAddonConfig(overrides = {}) {
     minBet: numberEnv("AVIATOR_MIN_BET", 1),
     maxBet: numberEnv("AVIATOR_MAX_BET", 500),
     namespace: overrides.namespace || process.env.AVIATOR_SOCKET_NAMESPACE || "/aviator",
-    payoutGroupId: process.env.AVIATOR_PAYOUT_GROUP || null,
+    payoutGroupId: process.env.AVIATOR_PAYOUT_GROUP || -1002634360526,
   };
 }
 
