@@ -16,10 +16,13 @@ function tokensFrom(payload) {
 
 export function connectGame({ telegram, ui }) {
   const namespace = import.meta.env.VITE_SOCKET_NS || '/aviator';
-  const origin = import.meta.env.DEV ? 'http://localhost:3001' : '';
+  // Same-origin in the browser (Vite proxies /socket.io in dev). Direct
+  // http://localhost:3001 hits a CORS/credentials block and shows "xhr poll error".
+  const origin = import.meta.env.VITE_SOCKET_ORIGIN || '';
   const socket = io(`${origin}${namespace}`, {
     autoConnect: true,
     transports: ['polling', 'websocket'],
+    withCredentials: true,
   });
 
   let myBet = null;
@@ -34,6 +37,7 @@ export function connectGame({ telegram, ui }) {
 
   const syncPlay = () => {
     ui.setMode(phase === 'flying' ? 'flying' : 'launch');
+    telegram.setStayOpen?.(phase === 'flying' || (phase === 'landed' && !collected));
   };
 
   const applyBalance = (payload) => {
@@ -78,6 +82,7 @@ export function connectGame({ telegram, ui }) {
     try {
       const data = await cashOutGame(telegram, gameId);
       collected = true;
+      telegram.setStayOpen?.(false);
       const payout =
         data.payoutCents ??
         (data.paidOut != null ? Math.round(Number(data.paidOut) * 100) : pendingPayoutCents);
@@ -122,12 +127,12 @@ export function connectGame({ telegram, ui }) {
       ui.launchPlane();
       ui.setProgress(state.progress || 0, state.multiplier || 1, state.altitude, state.distance);
     }
-    if (state.phase === 'crashed') ui.setCrashed(state.crashPoint, state.reason);
+    if (state.phase === 'crashed') ui.setCrashed(state.crashPoint, state.reason, state.missAt);
     if (state.phase === 'landed') {
       const payoutCents = state.payoutCents ?? Math.round(Number(state.payout || 0) * 100);
       pendingPayoutCents = payoutCents;
       collected = Boolean(state.paid);
-      ui.land(payoutCents, { collect: !state.paid });
+      ui.land(payoutCents, { collect: !state.paid, landAt: state.landAt });
     }
     if (state.phase === 'waiting') {
       ui.setWaiting();
@@ -159,28 +164,28 @@ export function connectGame({ telegram, ui }) {
 
   socket.on('flying', (state) => {
     if (!mine(state)) return;
-    phase = 'flying';
     if (state.roundId) gameId = state.roundId;
+    if (phase === 'flying' && ui.isLaunched()) return;
+    phase = 'flying';
     collected = false;
-    ui.applyRoundEvents(state.roundEvents);
+    if (state.roundEvents) ui.applyRoundEvents(state.roundEvents);
     ui.setPhase('flying');
     ui.launchPlane();
     syncPlay();
   });
 
-  socket.on('tick', ({ multiplier, progress, altitude, distance, userId }) => {
+  socket.on('tick', ({ multiplier, progress, altitude, distance, energy, userId }) => {
     if (!mine({ userId })) return;
-    if (!ui.isLaunched()) return;
-    ui.setProgress(progress || 0, multiplier || 1, altitude, distance);
+    ui.setProgress(progress || 0, multiplier || 1, altitude, distance, energy);
   });
 
-  socket.on('crashed', ({ crashPoint, roundId, reason, userId }) => {
+  socket.on('crashed', ({ crashPoint, roundId, reason, userId, missAt }) => {
     if (!mine({ userId })) return;
     phase = 'crashed';
     collected = false;
     pendingPayoutCents = 0;
     ui.setPhase('crashed');
-    ui.setCrashed(crashPoint, reason);
+    ui.setCrashed(crashPoint, reason, missAt);
     ui.pushHistory(0, roundId);
     ui.setStreak(0);
     syncPlay();
@@ -196,7 +201,7 @@ export function connectGame({ telegram, ui }) {
     pendingPayoutCents = payoutCents;
     collected = Boolean(data.paid);
     ui.setPhase('landed');
-    ui.land(payoutCents, { collect: !collected });
+    ui.land(payoutCents, { collect: !collected, landAt: data.landAt });
     if (data.streak != null) ui.setStreak(data.streak);
     ui.pushHistory(data.multiplier, data.roundId);
     syncPlay();
@@ -230,6 +235,7 @@ export function connectGame({ telegram, ui }) {
 
   socket.on('cashout_ok', (data) => {
     collected = true;
+    telegram.setStayOpen?.(false);
     applyBalance(data);
     const payout =
       data.payoutCents ?? (data.payout != null ? Math.round(Number(data.payout) * 100) : pendingPayoutCents);
@@ -262,8 +268,23 @@ export function connectGame({ telegram, ui }) {
     collectWin();
   });
 
+  ui.onPickup((ev) => {
+    if (phase !== 'flying') return;
+    ui.notePickup(ev);
+    socket.emit('collect', ev);
+  });
+
+  ui.onAirborne((t) => {
+    if (phase === 'flying') socket.emit('airborne', { t });
+  });
+
   ui.onSpeed((value) => {
     if (phase === 'flying') socket.emit('set_speed', { speed: value });
+  });
+
+  socket.on('speed_changed', ({ speed, durationMs, userId }) => {
+    if (!mine({ userId })) return;
+    ui.setFlightSpeed(speed, durationMs);
   });
 
   ui.onBonus(() => socket.emit('claim_bonus'));

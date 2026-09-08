@@ -5,8 +5,18 @@ import { t } from './i18n.js';
 
 async function start() {
   const boot = document.getElementById('boot-screen');
+  const gate = document.getElementById('tg-gate');
   try {
     const telegram = bootTelegram();
+    if (import.meta.env.PROD && !telegram.initData) {
+      boot?.classList.add('is-hidden');
+      if (gate) {
+        gate.hidden = false;
+        const line = gate.querySelector('p');
+        if (line) line.textContent = t.openInTelegram;
+      }
+      return;
+    }
     const root = document.getElementById('app');
     const ui = bindApp(root);
     const name = telegram.user?.username || telegram.user?.first_name || t.player;

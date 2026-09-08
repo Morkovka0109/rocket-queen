@@ -12,7 +12,7 @@ function initDataFromRequest(req) {
 
 function parseSpeed(raw) {
   const n = Number(raw);
-  if (!Number.isFinite(n)) return 1.2;
+  if (!Number.isFinite(n)) return 2;
   return Math.min(5, Math.max(1, n));
 }
 

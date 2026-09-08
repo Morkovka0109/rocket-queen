@@ -197,8 +197,10 @@ class GameAudio {
     this.unlock();
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
-    this.tone(this.sfxBus, t, 165, 'sine', 0.1, 0.01, 0.05, 0.16);
-    this.tone(this.sfxBus, t + 0.07, 131, 'sine', 0.07, 0.012, 0.06, 0.18);
+    this.whoosh(t, 0.12, 420, 90, 0.4);
+    this.tone(this.sfxBus, t, 90, 'triangle', 0.14, 0.005, 0.04, 0.12);
+    this.tone(this.sfxBus, t + 0.04, 165, 'sine', 0.1, 0.008, 0.05, 0.16);
+    this.tone(this.sfxBus, t + 0.12, 124, 'sine', 0.07, 0.01, 0.07, 0.2);
   }
 
   win() {

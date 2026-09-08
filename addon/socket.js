@@ -161,6 +161,18 @@ function attachAviatorSockets({
       game.setSpeed(String(user.id), payload.speed);
     });
 
+    socket.on("collect", (payload = {}) => {
+      const user = socket.data.user;
+      if (!user) return;
+      game.collectPickup(String(user.id), payload);
+    });
+
+    socket.on("airborne", (payload = {}) => {
+      const user = socket.data.user;
+      if (!user) return;
+      game.syncAirborne(String(user.id), payload.t);
+    });
+
     socket.on("cashout", async (payload = {}) => {
       const user = socket.data.user;
       if (!user) {

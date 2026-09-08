@@ -42,12 +42,29 @@ if (config.nodeEnv === 'production') {
 
 const httpServer = http.createServer(app);
 const io = new Server(httpServer, {
-  cors: { origin: config.clientOrigin, methods: ['GET', 'POST'] },
+  cors: { origin: config.clientOrigin, methods: ['GET', 'POST'], credentials: true },
 });
 
 attachSocketHandlers({ io, game, balances, config });
 game.start();
 
-httpServer.listen(config.port, () => {
-  console.log(`Aviator server listening on :${config.port}`);
-});
+function listen(attempt = 0) {
+  const onError = (err) => {
+    httpServer.off('listening', onListening);
+    if (err.code === 'EADDRINUSE' && attempt < 12) {
+      console.warn(`Port ${config.port} busy, retry ${attempt + 1}/12`);
+      setTimeout(() => listen(attempt + 1), 400);
+      return;
+    }
+    throw err;
+  };
+  const onListening = () => {
+    httpServer.off('error', onError);
+    console.log(`Aviator server listening on :${config.port}`);
+  };
+  httpServer.once('error', onError);
+  httpServer.once('listening', onListening);
+  httpServer.listen(config.port);
+}
+
+listen();

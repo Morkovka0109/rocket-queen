@@ -25,6 +25,7 @@ export const t = {
   },
   streakChip: (n) => `Серия ×${n}`,
   outAt: (mult, payout) => `Посадка @ ${mult}x · +${payout} ФАН`,
+  openInTelegram: 'Откройте игру из Telegram',
   player: 'Игрок',
   soundOn: 'Звук',
   soundOff: 'Без звука',

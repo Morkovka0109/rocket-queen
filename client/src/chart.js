@@ -6,7 +6,7 @@ export function createChart(parent) {
   const game = new Phaser.Game({
     type: Phaser.AUTO,
     parent,
-    backgroundColor: '#071433',
+    backgroundColor: '#4aa6e6',
     scene,
     audio: { noAudio: true },
     banner: false,
@@ -34,6 +34,12 @@ export function createChart(parent) {
     startFlying() {
       scene.setPhase('flying');
     },
+    onPickup(fn) {
+      scene.onPickup = fn;
+    },
+    onAirborne(fn) {
+      scene.onAirborne = fn;
+    },
     launch() {
       scene.launch();
     },
@@ -49,8 +55,11 @@ export function createChart(parent) {
     abortLaunch() {
       scene.abortLaunch();
     },
-    setSpeed(n) {
+    setSpeed(n, durationMs) {
       scene.setSpeed(n);
+      if (Number.isFinite(Number(durationMs)) && Number(durationMs) > 0) {
+        scene.flightMs = Number(durationMs);
+      }
     },
     setMultiplier(m) {
       scene.setMultiplier(m);
@@ -61,11 +70,14 @@ export function createChart(parent) {
     setProgress(p) {
       scene.setProgress(p);
     },
-    crash(point, onSettled) {
-      scene.crash(point, onSettled);
+    setEnergy(n) {
+      scene.setEnergy?.(n);
     },
-    land(onSettled) {
-      scene.land(onSettled);
+    crash(point, onSettled, missAt) {
+      scene.crash(point, onSettled, missAt);
+    },
+    land(onSettled, landAt) {
+      scene.land(onSettled, landAt);
     },
     reset() {
       scene.setPhase('waiting');

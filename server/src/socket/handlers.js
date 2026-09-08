@@ -31,7 +31,7 @@ function emitToUser(nsp, userId, event, payload) {
 
 function parseSpeed(raw) {
   const n = Number(raw);
-  if (!Number.isFinite(n)) return 1.2;
+  if (!Number.isFinite(n)) return 2;
   return Math.min(5, Math.max(1, n));
 }
 
@@ -130,6 +130,7 @@ export function attachSocketHandlers({ io, game, balances, config }) {
         return;
       }
 
+      game.forfeit(user.id);
       if (!balances.debit(user.id, amountCents)) {
         socket.emit('error_message', { error: 'Недостаточно средств' });
         return;
@@ -156,6 +157,18 @@ export function attachSocketHandlers({ io, game, balances, config }) {
       const user = socket.data.user;
       if (!user) return;
       game.setSpeed(user.id, parseSpeed(payload.speed));
+    });
+
+    socket.on('collect', (payload = {}) => {
+      const user = socket.data.user;
+      if (!user) return;
+      game.collectPickup(user.id, payload);
+    });
+
+    socket.on('airborne', (payload = {}) => {
+      const user = socket.data.user;
+      if (!user) return;
+      game.syncAirborne(user.id, payload.t);
     });
 
     socket.on('cashout', (payload = {}) => {

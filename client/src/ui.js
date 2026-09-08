@@ -41,6 +41,8 @@ export function bindApp(root) {
   };
 
   const chart = createChart(els.canvas);
+  chart.onPickup((ev) => pickupHandler?.(ev));
+  chart.onAirborne((t) => airborneHandler?.(t));
   const audio = getAudio();
   let betAmount = 1;
   let speed = 2;
@@ -48,7 +50,10 @@ export function bindApp(root) {
   let bonusHandler = null;
   let speedHandler = null;
   let collectHandler = null;
+  let pickupHandler = null;
+  let airborneHandler = null;
   let overlayKind = 'continue';
+  let pickLockUntil = 0;
   let myCents = 0;
   let targetMult = 1;
   let shownMult = 1;
@@ -98,6 +103,7 @@ export function bindApp(root) {
       return;
     }
     hideOverlay();
+    if (overlayKind === 'again' || overlayKind === 'continue') playHandler?.();
   });
 
   const syncSoundBtn = () => {
@@ -151,10 +157,7 @@ export function bindApp(root) {
     els.label.style.left = `${Math.min(Math.max(pos.x, half + 4), max - half - 4)}px`;
     els.label.style.top = `${pos.y}px`;
     const dm = targetMult - shownMult;
-    if (Math.abs(dm) > 0.002) {
-      shownMult += dm * (dm < 0 ? 0.38 : 0.14);
-      writeMult(shownMult);
-    } else if (shownMult !== targetMult) {
+    if (dm !== 0) {
       shownMult = targetMult;
       writeMult(shownMult);
     }
@@ -220,7 +223,7 @@ export function bindApp(root) {
     audio.click();
     playHandler?.();
   });
-  els.bonus.addEventListener('click', () => {
+  els.bonus?.addEventListener('click', () => {
     audio.click();
     bonusHandler?.();
   });
@@ -267,12 +270,30 @@ export function bindApp(root) {
     onCollect(fn) {
       collectHandler = fn;
     },
+    onPickup(fn) {
+      pickupHandler = fn;
+    },
+    notePickup(ev) {
+      pickLockUntil = Date.now() + 240;
+      let m = targetMult || 1;
+      const n = Number(String(ev?.value ?? '').replace(/[^\d.]/g, ''));
+      if (ev?.kind === 'add') m += n || 0;
+      else if (ev?.kind === 'mul') m *= n || 1;
+      else if (ev?.kind === 'rocket') m *= 0.5;
+      this.setMultiplier(Math.min(250, Math.floor(m * 100) / 100));
+    },
+    onAirborne(fn) {
+      airborneHandler = fn;
+    },
     onAutoCashoutChange() {},
     onBonus(fn) {
       bonusHandler = fn;
     },
     onSpeed(fn) {
       speedHandler = fn;
+    },
+    setFlightSpeed(n, durationMs) {
+      chart.setSpeed(n, durationMs);
     },
     setBalance(value) {
       const next = Number(value) || 0;
@@ -309,14 +330,22 @@ export function bindApp(root) {
       const n = Number(value) || 1;
       chart.setMultiplier(n);
       targetMult = n;
+      shownMult = n;
+      writeMult(n);
     },
-    setProgress(p, multiplier, alt, dist) {
+    setProgress(p, multiplier, alt, dist, energy) {
       progress = Math.max(0, Number(p) || 0);
-      if (alt != null) altitude = Number(alt) || 0;
-      if (dist != null) distanceM = Number(dist) || 0;
+      if (alt != null && Number.isFinite(Number(alt))) altitude = Number(alt);
+      if (dist != null && Number.isFinite(Number(dist))) distanceM = Number(dist);
+      else distanceM = Math.round(progress * 3800) / 10;
+      if (energy != null && Number.isFinite(Number(energy))) {
+        chart.setEnergy?.(energy);
+        if (alt == null || !Number.isFinite(Number(alt))) {
+          altitude = Math.round((6 + Number(energy) * 48) * 10) / 10;
+        }
+      }
       chart.setProgress(progress);
-      chart.setAltitude?.(altitude);
-      if (multiplier != null) this.setMultiplier(multiplier);
+      if (multiplier != null && Date.now() >= pickLockUntil) this.setMultiplier(multiplier);
       else writeMult(shownMult);
     },
     setWaiting() {
@@ -358,7 +387,7 @@ export function bindApp(root) {
     abortLaunch() {
       chart.abortLaunch();
     },
-    setCrashed(point, reason) {
+    setCrashed(point, reason, missAt) {
       const n = Number(point) || 1;
       targetMult = n;
       shownMult = n;
@@ -367,9 +396,9 @@ export function bindApp(root) {
       chart.crash(n, () => {
         showOverlay({ title: t.defeat, action: t.again, kind: 'again' });
         bang(els.fxLose, 'is-on', 700);
-      });
+      }, missAt);
     },
-    land(payoutCents, { collect = true } = {}) {
+    land(payoutCents, { collect = true, landAt } = {}) {
       const won = Number(payoutCents);
       const amount = Number.isFinite(won) && won > 0 ? fan(won / 100) : '';
       els.app.dataset.phase = 'landed';
@@ -385,7 +414,7 @@ export function bindApp(root) {
           kind: collect ? 'cashout' : 'continue',
         });
         bang(els.fxFlash, 'is-on', 450);
-      });
+      }, landAt);
     },
     markCollected(payoutCents) {
       const won = Number(payoutCents);

@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import { getAudio } from '../audio.js';
+import { OceanBackground } from '../background/OceanBackground.js';
 
 export const PLANE_SPRITE = '/assets/plane.png';
 export const CARRIER_LEFT = '/assets/carrier-left.png';
@@ -60,14 +61,15 @@ const WORLD_SPANS = 5.5; // screens of horizontal course
 const SKY_SPANS = 3.2; // screens of climbing room above the waterline
 const SEA_SPANS = 1.1; // screens of water below the waterline
 const CLOUD_COUNT = 30;
-const DECOR_NUMBERS = 96;
-const DECOR_ROCKETS = 16;
 
 // Camera keeps the plane right of centre and half way up the frame.
 const PLANE_SCREEN_X = 0.64;
 const PLANE_SCREEN_Y = 0.5;
 // Lowest the camera descends, chosen so the waterline settles at 63.2% height.
 const HORIZON_SCREEN = 0.632;
+// Energy at deck height. Above this the plane is in the sky; at or below it
+// it is close enough to land instead of flying past.
+const DECK_ENERGY = 0.36;
 
 function waveFor(events) {
   if (!events.length) return { ratio: 0.6, freq: Math.PI * 3.2 };
@@ -122,10 +124,18 @@ export class PlaneScene extends Phaser.Scene {
     this.shownProgress = 0;
     this.launchedAt = 0;
     this.flightMs = 18000;
+    this.glide = 1;
+    this.targetGlide = 1;
+    this.glideEase = 320;
+    this.popY = 0;
+    this.onPickup = null;
+    this.onAirborne = null;
   }
 
   setSpeed(value) {
-    this.speedFactor = Phaser.Math.Clamp(Number(value) || 2, 1, 5) / 2;
+    const speed = Phaser.Math.Clamp(Number(value) || 2, 1, 5);
+    this.speedFactor = speed / 2;
+    this.flightMs = Math.max(1500, 18000 / speed);
     getAudio().setRpm(this.speedFactor);
   }
 
@@ -135,6 +145,7 @@ export class PlaneScene extends Phaser.Scene {
     this.load.image('carrier-right-raw', CARRIER_RIGHT);
     this.load.image('rocket-raw', ROCKET_SPRITE);
     this.load.image('cloud-raw', CLOUD_SPRITE);
+    OceanBackground.preload(this);
   }
 
   chromaCrop(srcKey, destKey) {
@@ -180,7 +191,10 @@ export class PlaneScene extends Phaser.Scene {
   }
 
   create() {
+    this.ocean = new OceanBackground(this, { depth: -20, horizonScreen: HORIZON_SCREEN });
+    this.ocean.create();
     this.sky = this.add.graphics().setDepth(0);
+    this.sky.setVisible(false);
     this.sea = this.add.graphics().setDepth(0);
     this.waves = this.add.graphics().setDepth(1);
     this.sparkles = this.add.graphics().setDepth(1);
@@ -201,6 +215,9 @@ export class PlaneScene extends Phaser.Scene {
     this.chromaCrop('carrier-right-raw', 'carrier-right');
     this.chromaCrop('rocket-raw', 'rocket');
     this.chromaCrop('cloud-raw', 'cloud');
+    this.sea?.setVisible(false);
+    this.waves?.setVisible(false);
+    this.sparkles?.setVisible(false);
 
     // Squadron emblem is pinned to the viewport in the reference game, not to
     // the world, so it stays put while everything else scrolls past.
@@ -216,18 +233,23 @@ export class PlaneScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(1);
 
-    // Only two carriers exist: the one launched from and the one landed on.
+    // Launch carrier plus the checkpoint ships along the course (at least 4 total).
     this.ships = [
       this.add.image(0, 0, 'carrier-left').setDepth(2).setOrigin(0.5, 0.72),
       this.add.image(0, 0, 'carrier-right').setDepth(2).setOrigin(0.5, 0.72),
+      this.add.image(0, 0, 'carrier-left').setDepth(2).setOrigin(0.5, 0.72),
+      this.add.image(0, 0, 'carrier-right').setDepth(2).setOrigin(0.5, 0.72),
+      this.add.image(0, 0, 'carrier-left').setDepth(2).setOrigin(0.5, 0.72),
+      this.add.image(0, 0, 'carrier-right').setDepth(2).setOrigin(0.5, 0.72),
     ];
+    this.planShips = null;
+    this.missAt = null;
+    this.landAt = null;
     this.catapultRig = this.add.graphics().setDepth(3);
-    this.cloudSprites = Array.from({ length: CLOUD_COUNT }, () =>
-      this.add.image(0, 0, 'cloud').setDepth(1).setAlpha(0.5).setTint(0x9fb0d4),
-    );
+    this.cloudSprites = [];
 
     this.plane = this.add.image(0, 0, 'plane').setDepth(8);
-    this.plane.setOrigin(0.52, 0.58);
+    this.plane.setOrigin(0.45, 0.78);
     this.plane.setAlpha(0);
 
     this.redrawBackdrop();
@@ -261,10 +283,31 @@ export class PlaneScene extends Phaser.Scene {
 
   layout() {
     const { w, h, worldW } = this.world();
-    const ww = w * 0.52;
-    const launch = { x: w * 0.16, y: 0, ww };
-    const target = { x: worldW - w * 0.34, y: 0, ww };
-    return { w, h, worldW, horizon: 0, fleet: [launch, target], left: launch, ship: target };
+    const checks = this.planShips?.length
+      ? this.planShips
+      : [
+          { t: 0.28, shipLevel: 0.26 },
+          { t: 0.50, shipLevel: 0.30 },
+          { t: 0.72, shipLevel: 0.33 },
+          { t: 0.97, shipLevel: 0.36 },
+        ];
+    const n = 1 + checks.length;
+    const ww = Math.min(w * 0.5, (worldW * 0.78) / (n * 1.22));
+    const x0 = w * 0.36;
+    const x1 = worldW - w * 0.28;
+    const launch = { x: x0, y: 0, ww };
+    const fleet = [launch];
+    for (const ship of checks) {
+      const u = Phaser.Math.Clamp(Number(ship.t) / 0.97, 0.12, 1);
+      fleet.push({
+        x: lerp(x0, x1, u),
+        y: 0,
+        ww,
+        t: Number(ship.t),
+        shipLevel: Number(ship.shipLevel),
+      });
+    }
+    return { w, h, worldW, horizon: 0, fleet, left: launch, ship: fleet[fleet.length - 1] };
   }
 
   // Keeps the plane sized against the deck it launches from.
@@ -273,22 +316,41 @@ export class PlaneScene extends Phaser.Scene {
   }
 
   deckClearance() {
-    return Math.max(12, (this.plane?.displayHeight || 40) * 0.4);
+    const shipH = this.ships?.[0]?.displayHeight || 96;
+    return Math.max(22, shipH * 0.3);
   }
 
   startPoint() {
     const { left } = this.layout();
-    return { x: left.x - left.ww * 0.16, y: -this.deckClearance() };
+    return { x: left.x - left.ww * 0.12, y: -this.deckClearance() };
   }
 
   landPoint() {
-    const { ship } = this.layout();
+    const ship = this.landingShip();
     return { x: ship.x - ship.ww * 0.1, y: -this.deckClearance() };
   }
 
-  // Open water — either short of the landing deck or past its bow, never on a ship.
+  fleetShipAt(at) {
+    const { fleet } = this.layout();
+    const last = fleet[fleet.length - 1];
+    if (at == null) return last;
+    let hit = fleet[1] || last;
+    for (let i = 1; i < fleet.length; i += 1) {
+      if (fleet[i].t != null && fleet[i].t <= at + 0.03) hit = fleet[i];
+    }
+    return hit;
+  }
+
+  // Open water beside the missed ship — never on a deck.
   missPoint() {
-    const { left, ship } = this.layout();
+    const { fleet, left } = this.layout();
+    const t = this.missAt;
+    const matched = fleet.slice(1).find((slot) => slot.t != null && Math.abs(slot.t - Number(t)) < 0.04);
+    if (!matched) {
+      const px = this.plane?.x ?? 0;
+      return { x: px + 28, y: 18 };
+    }
+    const ship = matched;
     const launchBow = left.x + left.ww * 0.48;
     const stern = ship.x - ship.ww * 0.5;
     const bow = ship.x + ship.ww * 0.5;
@@ -304,37 +366,51 @@ export class PlaneScene extends Phaser.Scene {
     return { x: bow + 44, y: 18 };
   }
 
+  missedShip() {
+    return this.fleetShipAt(this.missAt);
+  }
+
+  landingShip() {
+    return this.fleetShipAt(this.landAt);
+  }
+
   pathPoints() {
     const { h } = this.world();
     const start = this.startPoint();
-    const land = this.landPoint();
-    const span = land.x - start.x;
-    // The original shot stays almost on the deck for the first metres, then
-    // the course climbs. A high first control point made the catapult look
-    // like a jump instead of a throw.
+    const { ship } = this.layout();
+    const end = { x: ship.x - ship.ww * 0.1, y: -this.deckClearance() };
+    const span = end.x - start.x;
+    // Catapult throws the plane high off the deck; the course stays in the sky
+    // and only sags toward the ships if energy falls.
     return [
       start,
-      { x: start.x + span * 0.16, y: -h * 0.55 },
-      { x: start.x + span * 0.55, y: -h * 1.65 },
-      { x: land.x - 8, y: -h * 0.38 },
+      { x: start.x + span * 0.18, y: -h * 0.92 },
+      { x: start.x + span * 0.48, y: -h * 0.78 },
+      { x: end.x - 8, y: -h * 0.58 },
     ];
   }
 
-  pathAt(t) {
+  pathAt(t, glideOverride) {
     const [p0, p1, p2, p3] = this.pathPoints();
     const clamped = Phaser.Math.Clamp(t, 0, 1);
     const pos = bezier(p0, p1, p2, p3, clamped);
-    const wv = this.roundWave;
-    const amp = (this.waveCap ?? 40) * wv.ratio * 0.08;
-    const wave = Math.sin(clamped * wv.freq * 0.28) * amp * Math.sin(Math.PI * clamped);
     const tan = bezierTangent(p0, p1, p2, p3, clamped);
     const len = Math.hypot(tan.x, tan.y) || 1;
     const nx = -tan.y / len;
     const ny = tan.x / len;
+    const { h } = this.world();
+    const deckY = -this.deckClearance();
+    const g = Number.isFinite(glideOverride) ? glideOverride : (this.glide ?? 1);
+    const k = (g - DECK_ENERGY) / (1 - DECK_ENERGY);
+    let y;
+    if (k >= 1) y = pos.y - Math.min(k - 1, 2.4) * h * 0.16;
+    else if (k <= 0) y = deckY + Math.min(-k, 1) * 28;
+    else y = lerp(deckY, pos.y, k);
+    const sag = Phaser.Math.Clamp(1 - Math.max(k, 0), 0, 1);
     return {
-      x: pos.x + nx * wave,
-      y: pos.y + ny * wave,
-      angle: this.pitchOf(tan.x, tan.y),
+      x: pos.x,
+      y,
+      angle: this.pitchOf(tan.x, tan.y) + sag * 11,
       nx,
       ny,
       tan,
@@ -345,17 +421,35 @@ export class PlaneScene extends Phaser.Scene {
   // a small nose-up on the climb and a small nose-down on the descent.
   pitchOf(dx, dy) {
     const deg = Phaser.Math.RadToDeg(Math.atan2(dy, Math.max(dx, 8)));
-    return Phaser.Math.Clamp(deg * 0.55 + (this.angleBias || 0), -32, 12);
+    return Phaser.Math.Clamp(deg * 0.7 + (this.angleBias || 0), -38, 12);
   }
 
-  bounceOff(_x, _y, strength = 70) {
-    if (this.bounceLock > 0) return;
-    if (!this.bumpVel) this.bumpVel = { x: 0, y: 0 };
-    this.bounceLock = 340;
-    // Sky is negative y: a hit always kicks the plane up, never down or back.
-    // Impulse, not a teleport — a snap offset reads as twitching in flight.
-    this.bumpVel.y -= Math.abs(strength) * 2.4;
-    this.angleBias -= 1.6;
+  bounceOff(_x, _y, _strength = 36) {
+    this.angleBias = -0.4;
+  }
+
+  sagOff(_strength = 70) {
+    if (this.bumpVel) {
+      this.bumpVel.x = 0;
+      this.bumpVel.y = 0;
+    }
+    this.bounceLock = 220;
+    this.energyLockUntil = this.time.now + 220;
+    this.angleBias = 0.6;
+    const from = this.targetGlide ?? this.glide ?? 1;
+    this.targetGlide = Math.max(0.08, from * 0.46);
+    this.glideEase = 560;
+  }
+
+  boostGlide(value) {
+    const raw = String(value ?? '');
+    const mul = /x|×/i.test(raw);
+    const n = Number(raw.replace(/[^\d.]/g, '')) || 2;
+    const add = mul ? 0.22 + n * 0.045 : 0.14 + n * 0.028;
+    const from = this.targetGlide ?? this.glide ?? 1;
+    this.targetGlide = Math.min(2.6, from + add);
+    this.glideEase = 420;
+    this.energyLockUntil = this.time.now + 220;
   }
 
   decayBump(delta) {
@@ -376,6 +470,8 @@ export class PlaneScene extends Phaser.Scene {
     if (Math.abs(this.bump.x) < 0.15) this.bump.x = 0;
     if (Math.abs(this.bump.y) < 0.15) this.bump.y = 0;
     if (Math.abs(this.angleBias) < 0.15) this.angleBias = 0;
+    this.popY = (this.popY || 0) * Math.exp(-delta / 260);
+    if (Math.abs(this.popY) < 0.25) this.popY = 0;
   }
 
   // Height of the course at a given world x. The course is monotonic in x, so a
@@ -409,7 +505,9 @@ export class PlaneScene extends Phaser.Scene {
     const { w, h, worldW } = this.world();
     const px = this.track?.x ?? this.smooth.x;
     const py = this.track?.y ?? this.smooth.y;
-    const anchorX = px - w * (PLANE_SCREEN_X - 0.5);
+    const waiting = !this.launched || this.phase === 'waiting';
+    const screenX = waiting ? 0.34 : PLANE_SCREEN_X;
+    const anchorX = px - w * (screenX - 0.5);
     const anchorY = py - h * (PLANE_SCREEN_Y - 0.5);
     const lowest = h * (0.5 - HORIZON_SCREEN);
     return {
@@ -424,19 +522,14 @@ export class PlaneScene extends Phaser.Scene {
     const target = this.cameraTarget();
     if (snap || !this.cam) {
       this.cam = { ...target };
-    } else if (this.phase === 'flying' || this.control === 'tween') {
-      // Stay locked to the course so lag and bump recovery cannot jitter the
-      // plane in the frame. Glances lift the sprite, not the camera.
-      this.cam.x = target.x;
-      this.cam.y = target.y;
-      this.cam.zoom = target.zoom;
     } else {
-      const k = 1 - Math.exp(-delta / 160);
-      this.cam.x = lerp(this.cam.x, target.x, k);
-      this.cam.y = lerp(this.cam.y, target.y, k);
-      this.cam.zoom = target.zoom;
+      const kx = 1 - Math.exp(-delta / 110);
+      const ky = 1 - Math.exp(-delta / 380);
+      this.cam.x = lerp(this.cam.x, target.x, kx);
+      this.cam.y = lerp(this.cam.y, target.y, ky);
+      this.cam.zoom = 1;
     }
-    cam.setZoom(this.cam.zoom);
+    cam.setZoom(1);
     cam.centerOn(this.cam.x, this.cam.y);
   }
 
@@ -510,16 +603,13 @@ export class PlaneScene extends Phaser.Scene {
   }
 
   redrawBackdrop() {
-    const { w, h, worldW, skyTop, seaBottom } = this.world();
+    const { w, h } = this.world();
     const { fleet } = this.layout();
-    // Sky brightens toward the waterline; the sea darkens with depth and the
-    // surface is drawn as a moving swell in drawWaves.
-    this.sky.clear();
-    this.sky.fillGradientStyle(0x1b2a63, 0x1b2a63, 0x34488f, 0x34488f, 1);
-    this.sky.fillRect(0, skyTop, worldW, -skyTop);
-    this.sea.clear();
-    this.sea.fillGradientStyle(0x1a2f86, 0x1a2f86, 0x09144f, 0x09144f, 1);
-    this.sea.fillRect(0, 0, worldW, seaBottom);
+    this.sea?.clear();
+    this.sea?.setVisible(false);
+    this.waves?.setVisible(false);
+    this.sparkles?.setVisible(false);
+    this.ocean?.resize();
     this.ships?.forEach((img, i) => {
       const slot = fleet[i];
       img.setVisible(Boolean(slot));
@@ -549,37 +639,11 @@ export class PlaneScene extends Phaser.Scene {
     this.scatterDecor();
   }
 
-  // The reference sky is littered with numbers and missiles that are never
-  // collected — they exist to make the sky feel busy while the world scrolls.
-  // Scenery is hung off the course rather than sprayed over the whole world, so
-  // it stays dense in frame without spawning thousands of unseen objects.
+  // Only real pickups from the round sit on the course — after takeoff, never
+  // over the launch deck. Dummy sky numbers are gone so every digit counts.
   scatterDecor() {
     this.decor?.forEach((d) => d.node.destroy());
     this.decor = [];
-    const clear = Math.max(90, (this.plane?.displayWidth || 90) * 1.5);
-    const values = [1, 1, 2, 2, 2, 3, 5, 10];
-
-    for (let i = 0; i < DECOR_NUMBERS; i += 1) {
-      const near = i % 3 === 0;
-      const spot = this.corridorSpot(i * 3 + 5, near ? 20 : clear, near ? 0.14 : 0.6);
-      const value = values[Math.floor(hashUnit(i * 7 + 1013) * values.length)];
-      this.decor.push({
-        node: this.numberLabel(spot.x, spot.y, String(value)),
-        kind: 'num',
-        value,
-        hit: false,
-      });
-    }
-
-    for (let i = 0; i < DECOR_ROCKETS; i += 1) {
-      const spot = this.corridorSpot(i * 5 + 41, clear * 1.6, 0.9);
-      const img = this.add
-        .image(spot.x, spot.y, 'rocket')
-        .setDisplaySize(74, 74)
-        .setAngle(186)
-        .setDepth(6);
-      this.decor.push({ node: img, kind: 'rocket', drift: 26 + hashUnit(i * 5 + 43) * 34, hit: false });
-    }
   }
 
   // A point beside the course: spread along its length, offset above or below
@@ -628,26 +692,39 @@ export class PlaneScene extends Phaser.Scene {
     this.items = [];
     this.pickups.removeAll(true);
     this.skySpawned = true;
-    const events = skyEvents(this.roundMods);
-    events.forEach((ev, i) => {
-      const t = Phaser.Math.Clamp(Number(ev.t) || 0.2, 0.06, 0.95);
-      const path = this.pathAt(this.courseT(t));
-      const side = i % 2 === 0 ? -1 : 1;
-      const offset = (ev.kind === 'rocket' ? 16 : 9) + (i % 3) * 7;
-      const x = path.x + path.nx * offset * side;
-      const y = path.y + path.ny * offset * side;
-      if (ev.kind === 'rocket') this.addBomb(x, y, t, 0.5, t);
-      else if (ev.kind === 'mul') this.addMultiplier(x, y, `x${ev.value}`, t);
-      else this.addMultiplier(x, y, String(ev.value), t);
+    const events = skyEvents(this.roundMods).filter((ev) => Number(ev.t) >= 0.16);
+    const { h, worldW } = this.world();
+    events.forEach((ev) => {
+      const t = Phaser.Math.Clamp(Number(ev.t) || 0.2, 0.16, 0.9);
+      const path = this.pathAt(this.courseT(t), 1);
+      const tanLen = Math.hypot(path.tan.x, path.tan.y) || 1;
+      const ox = Number.isFinite(Number(ev.ox)) ? Number(ev.ox) : (hashUnit(t * 97 + (ev.value || 1)) * 2 - 1);
+      const oy = Number.isFinite(Number(ev.oy)) ? Number(ev.oy) : (hashUnit(t * 53 + 11) * 2 - 1);
+      const spread = Math.hypot(ox, oy);
+      const near = spread <= 0.32;
+      const across = ox * h * (near ? 0.07 : 0.34);
+      const along = oy * (near ? 22 : worldW * 0.04);
+      const lift = oy * h * (near ? 0.045 : 0.2);
+      const x = path.x + path.nx * across + (path.tan.x / tanLen) * along;
+      const y = Phaser.Math.Clamp(
+        path.y + path.ny * across + (path.tan.y / tanLen) * along + lift,
+        -h * 0.92,
+        -24,
+      );
+      if (ev.kind === 'rocket') this.addBomb(x, y, t, 0.5, t, ev.id);
+      else if (ev.kind === 'mul') this.addMultiplier(x, y, `x${ev.value}`, t, ev.kind, ev.id, ev.value);
+      else this.addMultiplier(x, y, String(ev.value), t, ev.kind, ev.id, ev.value);
     });
   }
 
-  addBomb(x, y, t = 0, drop = 0.15, at = 1) {
-    const img = this.add.image(0, 0, 'rocket').setDisplaySize(72, 72).setAngle(186);
+  addBomb(x, y, t = 0, drop = 0.15, at = 1, id = null) {
+    const img = this.add.image(0, 0, 'rocket').setDisplaySize(64, 64).setAngle(186);
     const node = this.add.container(x, y, [img]).setDepth(7);
     this.pickups.add(node);
     this.items.push({
       type: 'bomb',
+      kind: 'rocket',
+      id,
       drop,
       at,
       node,
@@ -655,52 +732,71 @@ export class PlaneScene extends Phaser.Scene {
       y,
       t,
       alive: true,
-      bob: 5,
+      bob: 4,
     });
   }
 
-  addMultiplier(x, y, value, t = 0) {
-    const node = this.numberLabel(x, y, value).setDepth(7);
+  addMultiplier(x, y, label, t = 0, kind = 'add', id = null, amount = null) {
+    const node = this.numberLabel(x, y, label).setDepth(7);
     this.pickups.add(node);
-    this.items.push({ type: 'mult', value, node, x, y, t, alive: true, bob: -10 });
+    const value = Number(amount ?? String(label).replace(/[^\d.]/g, '')) || 1;
+    this.items.push({ type: 'mult', kind, id, value, node, x, y, t, alive: true, bob: 4 });
   }
 
   collectNearby() {
+    if (this.control === 'tween') return;
     if ((this.phase !== 'flying' && this.phase !== 'takeoff') || !this.plane) return;
-    const reach = Math.max(42, this.plane.displayWidth * 0.48);
+    const pw = this.plane.displayWidth * 0.28;
+    const ph = this.plane.displayHeight * 0.2;
+    const hits = [];
     for (const item of this.items) {
-      if (!item.alive) continue;
-      const d = Phaser.Math.Distance.Between(this.plane.x, this.plane.y, item.node.x, item.node.y);
-      const hit = item.type === 'bomb' ? d < reach + 10 : d < reach;
-      if (!hit) continue;
-      item.alive = false;
-      if (item.type === 'mult') {
-        this.bounceOff(item.node.x, item.node.y, 42);
-        this.collectFlash(item.node.x, item.node.y, `×${String(item.value).replace('x', '')}`);
-        getAudio().collect();
-        this.tweens.add({
-          targets: item.node,
-          scale: 1.4,
-          alpha: 0,
-          duration: 220,
-          onComplete: () => item.node.destroy(),
-        });
-      } else {
-        this.bounceOff(item.node.x, item.node.y, 22);
-        this.explodeAt(item.node.x, item.node.y);
-        this.popup(item.node.x, item.node.y, 'BANG!', '#ffe14a');
-        getAudio().explode();
-        this.tweens.add({
-          targets: item.node,
-          scale: 1.5,
-          alpha: 0,
-          duration: 200,
-          onComplete: () => item.node.destroy(),
-        });
-      }
+      if (!item.alive || !item.node) continue;
+      const iw = item.type === 'bomb' ? 16 : 12;
+      const ih = item.type === 'bomb' ? 16 : 12;
+      const dx = Math.abs(this.plane.x - item.node.x);
+      const dy = Math.abs(this.plane.y - item.node.y);
+      if (dx >= pw + iw || dy >= ph + ih) continue;
+      hits.push({ item, d: dx * dx + dy * dy });
+    }
+    hits.sort((a, b) => a.d - b.d);
+    const nearest = hits[0];
+    if (!nearest) {
+      this.glanceDecor(Math.max(22, this.plane.displayWidth * 0.22));
       return;
     }
-    this.glanceDecor(reach);
+    const item = nearest.item;
+    item.alive = false;
+    if (item.type === 'mult') {
+      this.bounceOff(item.node.x, item.node.y, 12);
+      this.boostGlide(item.value);
+      this.collectFlash(item.node.x, item.node.y, `×${String(item.value).replace('x', '')}`);
+      getAudio().collect();
+      this.tweens.add({
+        targets: item.node,
+        scale: 1.4,
+        alpha: 0,
+        duration: 220,
+        onComplete: () => item.node.destroy(),
+      });
+    } else {
+      this.sagOff(86);
+      this.explodeAt(item.node.x, item.node.y);
+      this.popup(item.node.x, item.node.y, 'BANG!', '#ffe14a');
+      getAudio().explode();
+      this.tweens.add({
+        targets: item.node,
+        scale: 1.5,
+        alpha: 0,
+        duration: 200,
+        onComplete: () => item.node.destroy(),
+      });
+    }
+    this.onPickup?.({
+      id: item.id,
+      t: item.t,
+      kind: item.kind,
+      value: item.value,
+    });
   }
 
   glanceDecor(reach) {
@@ -710,22 +806,10 @@ export class PlaneScene extends Phaser.Scene {
       const dxy = Phaser.Math.Distance.Between(this.plane.x, this.plane.y, d.node.x, d.node.y);
       if (dxy > reach + (d.kind === 'rocket' ? 12 : 0)) continue;
       d.hit = true;
-      if (d.kind === 'num') {
-        this.bounceOff(d.node.x, d.node.y, 42);
-        this.collectFlash(d.node.x, d.node.y, `×${d.value}`);
-        getAudio().collect();
-      } else {
-        this.bounceOff(d.node.x, d.node.y, 22);
-        this.explodeAt(d.node.x, d.node.y);
-        this.popup(d.node.x, d.node.y, 'BANG!', '#ffe14a');
-        getAudio().explode();
-      }
       this.tweens.add({
         targets: d.node,
-        scale: 1.35,
-        alpha: 0,
-        duration: 220,
-        onComplete: () => d.node.destroy(),
+        alpha: 0.15,
+        duration: 180,
       });
       return;
     }
@@ -855,25 +939,10 @@ export class PlaneScene extends Phaser.Scene {
   // course height under them to change, and resampling it every frame for every
   // cloud would cost more than the whole backdrop.
   layoutClouds() {
-    if (!this.cloudSprites?.length) return;
-    const { w } = this.world();
-    this.cloudSeeds = this.cloudSprites.map((cloud, i) => {
-      const width = Math.max(40, w * 0.055 * (0.55 + hashUnit(i + 11) * 0.8));
-      cloud.setDisplaySize(width, width * 0.42);
-      const spot = this.corridorSpot(i * 7 + 101, width * 0.8, 1.15);
-      return { width, y: spot.y, home: spot.x, drift: 5 + hashUnit(i + 21) * 14 };
-    });
+    this.cloudSprites?.forEach((cloud) => cloud.setVisible(false));
   }
 
-  drawClouds(now) {
-    if (!this.cloudSeeds?.length) return;
-    const { worldW } = this.world();
-    this.cloudSprites.forEach((cloud, i) => {
-      const seed = this.cloudSeeds[i];
-      const span = worldW + seed.width * 2;
-      cloud.setPosition(((seed.home + now * seed.drift) % span) - seed.width, seed.y);
-    });
-  }
+  drawClouds(_now) {}
 
   bobPickups(now) {
     for (const item of this.items) {
@@ -908,6 +977,7 @@ export class PlaneScene extends Phaser.Scene {
   }
 
   update(_time, delta) {
+    this.ocean?.update(delta);
     const now = _time / 1000;
     this.tick += 1;
     this.seaClock = now;
@@ -923,45 +993,52 @@ export class PlaneScene extends Phaser.Scene {
     this.maybeCollectRing();
     this.decayBump(delta);
     if (this.control !== 'tween') {
-      if (this.launched && this.phase !== 'waiting' && this.launchedAt) {
+      if (this.launched && (this.phase === 'flying' || this.phase === 'takeoff')) {
         const span = Math.max(1200, this.flightMs);
-        let local = (this.time.now - this.launchedAt) / span;
-        const err = this.progress - local;
-        if (this.progress > 0.002 && Math.abs(err) > 0.008) {
-          this.launchedAt -= err * span * (1 - Math.exp(-delta / 1400));
-          local = (this.time.now - this.launchedAt) / span;
+        const dP = delta / span;
+        const decay = Math.exp(-1.05 * dP);
+        if (this.targetGlide != null) {
+          this.targetGlide = Math.max(0.08, this.targetGlide * decay);
+          const tau = Math.max(180, this.glideEase || 320);
+          this.glide += (this.targetGlide - this.glide) * (1 - Math.exp(-delta / tau));
+        } else {
+          this.glide = Math.max(0.08, (this.glide || 1) * decay);
         }
-        this.shownProgress = Phaser.Math.Clamp(local, 0, 0.97);
+        this.glide = Phaser.Math.Clamp(this.glide, 0.08, 2.6);
+        this.shownProgress = Phaser.Math.Clamp((this.shownProgress || 0) + dP, 0, 0.97);
+        const err = (this.progress || 0) - this.shownProgress;
+        // Never rewind after the catapult: server progress lags the visual shot
+        // and pulling shownProgress back makes the plane slide backward.
+        if (err > 0.04) {
+          this.shownProgress += err * (1 - Math.exp(-delta / 1800));
+        }
+        getAudio().setRpm(Math.max(0.4, (this.glide || 1) * (this.speedFactor || 1)));
       } else if (!this.launched || this.phase === 'waiting') {
         this.shownProgress = this.progress;
+        this.glide = 1;
+        this.targetGlide = 1;
+        this.glideEase = 320;
       }
     }
 
     if (this.control === 'auto' && this.plane) {
       if (!this.launched || this.phase === 'waiting') {
         const start = this.startPoint();
-        const { left } = this.layout();
-        const heave = this.shipHeave(left.x, now);
-        const pitch = this.shipPitch(left.x, left.ww * 0.38, now);
         this.track.x = start.x;
-        this.track.y = start.y + heave;
+        this.track.y = start.y;
         this.smooth.x = start.x;
-        this.smooth.y = start.y + heave;
-        this.smooth.angle = -8 + pitch * 0.35;
+        this.smooth.y = start.y;
+        this.smooth.angle = -8;
       } else if (this.phase === 'takeoff') {
         const point = this.pathAt(this.flightT());
         this.track.x = point.x;
         this.track.y = point.y;
-        this.smooth.x = point.x + this.bump.x;
-        this.smooth.y = point.y + this.bump.y;
-        this.smooth.angle = lerp(this.smooth.angle, point.angle, 1 - Math.exp(-delta / 80));
+        this.smooth.x = point.x;
+        this.smooth.y = lerp(this.smooth.y, point.y + (this.popY || 0), 1 - Math.exp(-delta / 160));
+        this.smooth.angle = lerp(this.smooth.angle, point.angle, 1 - Math.exp(-delta / 220));
         this.collectNearby();
       } else if (this.phase === 'flying') {
-        this.visualM = lerp(
-          this.visualM,
-          this.displayM,
-          this.displayM < this.visualM - 0.01 ? 1 - Math.pow(0.02, delta / 16.67) : 1 - Math.pow(0.08, delta / 16.67),
-        );
+        this.visualM = this.displayM;
         this.visualCourse = lerp(
           this.visualCourse,
           this.courseM,
@@ -970,24 +1047,19 @@ export class PlaneScene extends Phaser.Scene {
         const point = this.pathAt(this.flightT());
         this.track.x = point.x;
         this.track.y = point.y;
-        this.smooth.x = point.x + this.bump.x;
-        this.smooth.y = point.y + this.bump.y;
-        this.smooth.angle = lerp(this.smooth.angle, point.angle, 1 - Math.exp(-delta / 80));
-        if (this.activeEvent === 'turbulence') {
-          this.smooth.x += Math.sin(now * 6) * 0.7;
-          this.smooth.y += Math.cos(now * 5) * 0.5;
-        }
+        this.smooth.x = point.x;
+        this.smooth.y = lerp(this.smooth.y, point.y + (this.popY || 0), 1 - Math.exp(-delta / 160));
+        this.smooth.angle = lerp(this.smooth.angle, point.angle, 1 - Math.exp(-delta / 220));
         this.collectNearby();
+      } else if (this.phase === 'landing') {
+        this.stepLanding(delta, now);
       } else if (this.phase === 'landed') {
         const land = this.landPoint();
-        const { ship } = this.layout();
-        const heave = this.shipHeave(ship.x, now);
-        const pitch = this.shipPitch(ship.x, ship.ww * 0.38, now);
         this.track.x = land.x;
-        this.track.y = land.y + heave;
+        this.track.y = land.y;
         this.smooth.x = land.x;
-        this.smooth.y = land.y + heave;
-        this.smooth.angle = -16 + pitch * 0.35;
+        this.smooth.y = land.y;
+        this.smooth.angle = -16;
       }
       this.placeFromSmooth();
     }
@@ -1035,80 +1107,13 @@ export class PlaneScene extends Phaser.Scene {
     if (this.phase === 'waiting' || this.phase === 'takeoff') this.drawCatapult();
   }
 
-  drawWaves(now) {
-    const g = this.waves;
-    if (!g) return;
-    g.clear();
-    const view = this.cameras.main.worldView;
-    if (!view || view.bottom < -24) return;
-    const { h } = this.world();
-    const s = h / 720;
-    const left = view.x - 48;
-    const right = view.right + 48;
-    const step = Math.max(7, Math.round(view.width / 64));
-
-    const heightAt = (x, depth) => {
-      const falloff = 1 / (1 + depth * 0.012);
-      return (
-        depth +
-        this.seaSwell(x, now) * (0.35 + 0.65 * falloff) +
-        this.seaChop(x + depth * 6, now) * (0.45 + depth * 0.008)
-      );
-    };
-
-    g.fillStyle(0x2a4596, 0.34);
-    g.beginPath();
-    for (let x = left, i = 0; x <= right; x += step, i += 1) {
-      const y = heightAt(x, 0);
-      if (i === 0) g.moveTo(x, y);
-      else g.lineTo(x, y);
-    }
-    g.lineTo(right, 36 * s);
-    g.lineTo(left, 36 * s);
-    g.closePath();
-    g.fillPath();
-
-    g.lineStyle(2, 0xeaf2ff, 0.3);
-    g.beginPath();
-    for (let x = left, i = 0; x <= right; x += step, i += 1) {
-      const y = heightAt(x, 0);
-      if (i === 0) g.moveTo(x, y);
-      else g.lineTo(x, y);
-    }
-    g.strokePath();
-
-    const bands = [
-      { depth: 20 * s, color: 0xc5d4f4, alpha: 0.13 },
-      { depth: 42 * s, color: 0x96addf, alpha: 0.16 },
-      { depth: 72 * s, color: 0x738dc9, alpha: 0.18 },
-      { depth: 110 * s, color: 0x5c78b6, alpha: 0.2 },
-    ];
-    for (const b of bands) {
-      if (b.depth > view.bottom + 12) continue;
-      g.lineStyle(1.2, b.color, b.alpha);
-      g.beginPath();
-      for (let x = left, i = 0; x <= right; x += step, i += 1) {
-        const y = heightAt(x, b.depth);
-        if (i === 0) g.moveTo(x, y);
-        else g.lineTo(x, y);
-      }
-      g.strokePath();
-    }
+  drawWaves(_now) {
+    this.waves?.clear();
   }
 
   // Glints on the water, drawn only across the stretch the camera can see.
-  drawSparkles(now) {
-    const { h, worldW, seaBottom } = this.world();
-    const view = this.cameras.main.worldView;
-    this.sparkles.clear();
-    if (!view || view.bottom < 0) return;
-    for (const d of this.dots) {
-      const x = (d.x * worldW + now * d.s * 12) % worldW;
-      if (x < view.x - 40 || x > view.right + 40) continue;
-      const y = 8 + Math.pow(d.y, 2.2) * (seaBottom - 16) + this.seaSurface(x, now) * (1 - d.y * 0.55);
-      this.sparkles.fillStyle(0xffffff, 0.18 + Math.abs(Math.sin(now * d.s + d.y * 6)) * 0.38);
-      this.sparkles.fillCircle(x, y, d.r * (1 + (1 - d.y) * 0.4) * (h / 900));
-    }
+  drawSparkles(_now) {
+    this.sparkles?.clear();
   }
 
   clearRoundFx() {
@@ -1131,6 +1136,7 @@ export class PlaneScene extends Phaser.Scene {
       this.ringItem = null;
     }
     this.roundMods = mod || null;
+    this.planShips = Array.isArray(mod?.ships) && mod.ships.length ? mod.ships : this.planShips;
     this.ringCollected = false;
     this.activeEvent = null;
     if (mod?.golden) this.plane?.setTint(0xffd56a);
@@ -1141,7 +1147,7 @@ export class PlaneScene extends Phaser.Scene {
     else this.clearPickups();
     if (mod?.ringAt) {
       const t = Phaser.Math.Clamp(Number(mod.ringAt), 0.12, 0.85);
-      const path = this.pathAt(t);
+      const path = this.pathAt(t, 1);
       this.spawnRing(path.x, path.y, t);
     }
     this.redrawBackdrop();
@@ -1195,11 +1201,18 @@ export class PlaneScene extends Phaser.Scene {
       this.shuttleSlide = 0;
       this.bump = { x: 0, y: 0 };
       this.bumpVel = { x: 0, y: 0 };
+      this.glide = 1;
+      this.targetGlide = 1;
+      this.glideEase = 320;
       this.angleBias = 0;
       this.launchT = 0;
       this.bounceLock = 0;
       this.shownProgress = 0;
       this.launchedAt = 0;
+      this.missAt = null;
+      this.landAt = null;
+      this.landSettle = null;
+      this.onDeck = false;
       this.clearRoundFx();
       this.clearPickups();
       this.clearTrail();
@@ -1239,7 +1252,13 @@ export class PlaneScene extends Phaser.Scene {
     this.shuttleSlide = 0;
     this.bump = { x: 0, y: 0 };
     this.bumpVel = { x: 0, y: 0 };
+    this.glide = 1;
+    this.targetGlide = 1;
+    this.glideEase = 320;
     this.angleBias = 0;
+    this.popY = 0;
+    this.missAt = null;
+    this.landAt = null;
     this.plane.setAlpha(1);
     this.plane.setScale(this.baseScale);
     const start = this.startPoint();
@@ -1258,21 +1277,24 @@ export class PlaneScene extends Phaser.Scene {
 
     const from = { x: start.x, y: start.y };
     this.moveDummy = { t: 0 };
-    this.flightMs = Math.max(1500, 18000 / (this.speedFactor * 2));
-    const catapultMs = Math.round(Phaser.Math.Clamp(520 / this.speedFactor, 300, 780));
-    this.launchT = Phaser.Math.Clamp(catapultMs / this.flightMs, 0.025, 0.1);
+    this.flightMs = Math.max(1500, 18000 / Math.max(0.5, this.speedFactor * 2));
+    const { w, h } = this.world();
+    let launchT = 0.16;
+    let target = this.pathAt(this.courseT(launchT), 1);
+    while (
+      launchT < 0.4 &&
+      (target.x < from.x + w * 0.22 || target.y > from.y - h * 0.52)
+    ) {
+      launchT += 0.02;
+      target = this.pathAt(this.courseT(launchT), 1);
+    }
+    this.launchT = launchT;
     this.shownProgress = 0;
     this.launchedAt = this.time.now;
-    const handoff = this.courseT(this.launchT);
-    const target = this.pathAt(handoff);
-    const shot = Math.max(48, target.x - from.x);
-    const p1 = { x: from.x + shot * 0.4, y: from.y - 5 };
-    const inherit = (0.97 * this.launchT) / 3;
-    const p2 = {
-      x: target.x - target.tan.x * inherit,
-      y: target.y - target.tan.y * inherit,
+    const mid = {
+      x: from.x + (target.x - from.x) * 0.42,
+      y: from.y + (target.y - from.y) * 0.68,
     };
-    if (p2.x <= p1.x + 8) p2.x = p1.x + Math.max(12, shot * 0.35);
 
     this.catapultBlast(start.x, start.y);
     const audio = getAudio();
@@ -1284,16 +1306,16 @@ export class PlaneScene extends Phaser.Scene {
     this.tweens.add({
       targets: this.moveDummy,
       t: 1,
-      duration: catapultMs,
+      duration: 380,
       ease: 'Linear',
       onUpdate: () => {
         const t = easeCatapult(this.moveDummy.t);
         const u = 1 - t;
-        this.plane.x = u * u * u * from.x + 3 * u * u * t * p1.x + 3 * u * t * t * p2.x + t * t * t * target.x;
-        this.plane.y = u * u * u * from.y + 3 * u * u * t * p1.y + 3 * u * t * t * p2.y + t * t * t * target.y;
-        const dx = 3 * u * u * (p1.x - from.x) + 6 * u * t * (p2.x - p1.x) + 3 * t * t * (target.x - p2.x);
-        const dy = 3 * u * u * (p1.y - from.y) + 6 * u * t * (p2.y - p1.y) + 3 * t * t * (target.y - p2.y);
-        this.plane.angle = this.pitchOf(Math.max(dx, 12), dy);
+        this.plane.x = u * u * from.x + 2 * u * t * mid.x + t * t * target.x;
+        this.plane.y = u * u * from.y + 2 * u * t * mid.y + t * t * target.y;
+        const dx = 2 * u * (mid.x - from.x) + 2 * t * (target.x - mid.x);
+        const dy = 2 * u * (mid.y - from.y) + 2 * t * (target.y - mid.y);
+        this.plane.angle = lerp(this.plane.angle, this.pitchOf(Math.max(dx, 12), dy), 0.28);
         this.shuttleSlide = t;
         this.shownProgress = this.launchT * t;
         this.drawCatapult();
@@ -1303,17 +1325,23 @@ export class PlaneScene extends Phaser.Scene {
         this.shuttleSlide = 1;
         this.shownProgress = this.launchT;
         this.launchedAt = this.time.now - this.launchT * this.flightMs;
+        this.plane.setPosition(target.x, target.y);
+        this.smooth.x = target.x;
+        this.smooth.y = target.y;
+        this.track.x = target.x;
+        this.track.y = target.y;
         this.drawCatapult();
         this.tweens.add({
           targets: this,
           shuttleSlide: 0,
-          duration: 220,
+          duration: 160,
           ease: 'Quad.in',
           onUpdate: () => this.drawCatapult(),
         });
         sync();
         this.phase = 'flying';
         this.control = 'auto';
+        this.onAirborne?.(this.launchT);
       },
     });
   }
@@ -1350,63 +1378,157 @@ export class PlaneScene extends Phaser.Scene {
     this.progress = Phaser.Math.Clamp(Number(value) || 0, 0, 1);
   }
 
-  land(onSettled) {
+  setEnergy(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return;
+    const next = Phaser.Math.Clamp(n, 0.08, 2.6);
+    const local = this.targetGlide ?? this.glide ?? 1;
+    if ((this.energyLockUntil || 0) > this.time.now) {
+      if (Math.abs(next - local) > 0.04) return;
+    }
+    if (Math.abs(next - local) > 0.2) {
+      this.targetGlide = local + (next - local) * 0.4;
+      return;
+    }
+    this.targetGlide = next;
+  }
+
+  land(onSettled, landAt) {
+    if (landAt != null) this.landAt = Number(landAt);
     if (!this.plane || this.phase === 'landed' || this.phase === 'landing') {
       onSettled?.();
       return;
     }
     this.phase = 'landing';
-    this.control = 'tween';
+    this.control = 'auto';
     this.stopMotion();
-    getAudio().stopEngine();
+    this.landSettle = onSettled;
+    this.onDeck = false;
+    this.landHits = 0;
     this.items.forEach((item) => {
       if (!item.alive) return;
       item.alive = false;
       this.tweens.add({
         targets: item.node,
         alpha: 0,
-        duration: 280,
+        duration: 220,
         onComplete: () => item.node.destroy(),
       });
     });
-    const from = { x: this.plane.x, y: this.plane.y, angle: this.plane.angle };
     const land = this.landPoint();
-    this.moveDummy = { t: 0 };
-    this.tweens.add({
-      targets: this.moveDummy,
-      t: 1,
-      duration: 1100,
-      ease: 'Sine.inOut',
-      onUpdate: () => {
-        const t = this.moveDummy.t;
-        const mid = {
-          x: from.x + (land.x - from.x) * 0.55,
-          y: Math.min(from.y, land.y) - 70,
-        };
-        const u = 1 - t;
-        this.plane.x = u * u * from.x + 2 * u * t * mid.x + t * t * land.x;
-        this.plane.y = u * u * from.y + 2 * u * t * mid.y + t * t * land.y;
-        this.plane.angle = lerp(from.angle, -14, t);
-        this.smooth.x = this.plane.x;
-        this.smooth.y = this.plane.y;
-        this.smooth.angle = this.plane.angle;
-        this.track.x = this.plane.x;
-        this.track.y = this.plane.y;
-        this.syncLabel();
-      },
-      onComplete: () => {
-        this.phase = 'landed';
-        this.launched = false;
-        this.control = 'auto';
-        getAudio().land();
-        getAudio().win();
-        getAudio().setBed('wait');
-        onSettled?.();
-      },
+    const dx = land.x - this.plane.x;
+    const dy = land.y - this.plane.y;
+    this.landVel = {
+      x: Phaser.Math.Clamp(dx * 1.15 + 90, 120, 360),
+      y: Phaser.Math.Clamp(dy * 0.85 + 55, 50, 320),
+    };
+    getAudio().setRpm(0.45);
+    this.time.delayedCall(3200, () => {
+      if (this.phase === 'landing') this.finishLanding();
     });
   }
 
-  crash(point, onSettled) {
+  stepLanding(delta, now) {
+    if (!this.plane || !this.landVel) return;
+    const dt = Math.min(0.045, delta / 1000);
+    const { h } = this.world();
+    const ship = this.landingShip();
+    const land = this.landPoint();
+    const heave = this.shipHeave(ship.x, now);
+    const deckY = land.y + heave;
+    const gravity = h * 1.35;
+    const minX = ship.x - ship.ww * 0.4;
+    const maxX = ship.x + ship.ww * 0.26;
+
+    this.landVel.y += gravity * dt;
+    this.plane.x += this.landVel.x * dt;
+    this.plane.y += this.landVel.y * dt;
+    this.plane.x = Phaser.Math.Clamp(this.plane.x, minX, maxX);
+
+    if (this.plane.y >= deckY) {
+      const impact = Math.max(0, this.landVel.y);
+      this.plane.y = deckY;
+      if (!this.onDeck) {
+        this.onDeck = true;
+        getAudio().land();
+        getAudio().stopEngine();
+      }
+      if (impact > 36) {
+        this.landHits += 1;
+        this.landVel.y = -impact * (this.landHits === 1 ? 0.32 : 0.16);
+        this.landVel.x *= 0.7;
+        this.plane.angle += 4;
+        this.deckHitFx(this.plane.x, deckY, this.landHits === 1 ? 1 : 0.45);
+      } else {
+        this.landVel.y = 0;
+      }
+      this.landVel.x *= Math.exp(-dt / 0.26);
+    }
+
+    if (this.plane.x >= maxX - 1) this.landVel.x *= 0.35;
+
+    const pitch = this.shipPitch(ship.x, ship.ww * 0.38, now);
+    const flying = this.plane.y < deckY - 3;
+    const want = flying
+      ? Phaser.Math.Clamp(this.landVel.y * 0.035 - 2, -16, 14)
+      : -12 + pitch * 0.4;
+    this.plane.angle = lerp(this.plane.angle, want, 1 - Math.exp(-delta / 150));
+
+    this.smooth.x = this.plane.x;
+    this.smooth.y = this.plane.y;
+    this.smooth.angle = this.plane.angle;
+    this.track.x = this.plane.x;
+    this.track.y = this.plane.y;
+    this.syncLabel();
+
+    const still = Math.abs(this.landVel.x) < 14 && Math.abs(this.landVel.y) < 10;
+    if (this.onDeck && still && this.plane.y >= deckY - 2) this.finishLanding();
+  }
+
+  finishLanding() {
+    if (this.phase !== 'landing') return;
+    this.phase = 'landed';
+    this.launched = false;
+    this.onDeck = true;
+    this.landVel = { x: 0, y: 0 };
+    getAudio().win();
+    getAudio().stopEngine();
+    getAudio().setBed('wait');
+    const done = this.landSettle;
+    this.landSettle = null;
+    done?.();
+  }
+
+  deckHitFx(x, y, power = 1) {
+    const n = Math.round(5 * power);
+    for (let i = 0; i < n; i += 1) {
+      const puff = this.add
+        .ellipse(x - 8 - i * 7, y + 2, 10 + i * 2, 5, i % 2 ? 0xdde6f4 : 0xffffff, 0.5 * power)
+        .setDepth(7);
+      this.tweens.add({
+        targets: puff,
+        x: puff.x - 18 - i * 6,
+        y: puff.y - 4,
+        scaleX: 2.2,
+        scaleY: 1.6,
+        alpha: 0,
+        duration: 280 + i * 40,
+        ease: 'Sine.out',
+        onComplete: () => puff.destroy(),
+      });
+    }
+    const skid = this.add.rectangle(x - 16, y + 1, 28 * power, 2, 0xffffff, 0.35).setDepth(6);
+    this.tweens.add({
+      targets: skid,
+      scaleX: 2.4,
+      alpha: 0,
+      duration: 420,
+      onComplete: () => skid.destroy(),
+    });
+  }
+
+  crash(point, onSettled, missAt) {
+    if (missAt != null) this.missAt = Number(missAt);
     if (!this.launched || this.phase === 'landing' || this.phase === 'landed' || this.phase === 'crashed') {
       onSettled?.();
       return;
